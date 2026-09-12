@@ -1,0 +1,42 @@
+name: Test and deploy to Val Town
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-to-val-town
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install and test
+        run: |
+          npm ci
+          npm run check
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Check Val Town modules
+        run: deno check --allow-import=esm.town,esm.sh --node-modules-dir=manual index.ts frontend/index.tsx
+
+      - name: Install vt CLI
+        run: deno install -gArf jsr:@valtown/vt@0.1.56
+
+      - name: Push to Val Town
+        env:
+          VAL_TOWN_API_KEY: ${{ secrets.VAL_TOWN_API_KEY }}
+        run: vt push
