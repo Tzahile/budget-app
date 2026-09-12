@@ -1,0 +1,298 @@
+/** @jsxImportSource https://esm.sh/react@18.2.0 */
+import { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@18.2.0";
+import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/react@18.2.0";
+import type { Account, AppData, PlannedTransaction, Reserve, Transaction } from "../../shared/types.ts";
+import { householdDate } from "../../shared/finance.ts";
+
+type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
+type Editor =
+  | { type: "account"; item?: Account }
+  | { type: "transaction"; item?: Transaction }
+  | { type: "planned"; item?: PlannedTransaction }
+  | { type: "reserve"; item?: Reserve }
+  | null;
+
+interface Session {
+  authenticated: boolean;
+  authorized: boolean;
+  username?: string;
+}
+
+const nav: { id: View; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "activity", label: "Activity" },
+  { id: "planned", label: "Planned" },
+  { id: "reserves", label: "Reserves" },
+  { id: "accounts", label: "Accounts" },
+];
+
+export function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [data, setData] = useState<AppData | null>(null);
+  const [view, setView] = useState<View>("overview");
+  const [editor, setEditor] = useState<Editor>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    const nextSession = await api<Session>("/api/session", undefined, false);
+    setSession(nextSession);
+    if (nextSession.authorized) setData(await api<AppData>("/api/data"));
+  }, []);
+
+  useEffect(() => {
+    load().catch((err) => setError(messageOf(err)));
+  }, [load]);
+
+  const mutate = useCallback(async (path: string, method: string, body?: unknown) => {
+    setBusy(true);
+    setError("");
+    try {
+      await api(path, { method, body: body == null ? undefined : JSON.stringify(body) });
+      setEditor(null);
+      setData(await api<AppData>("/api/data"));
+    } catch (err) {
+      setError(messageOf(err));
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  if (!session) return <Centered><Spinner label="Opening your budget…" /></Centered>;
+  if (!session.authenticated) {
+    return (
+      <Centered>
+        <div className="w-full max-w-sm rounded-3xl bg-white p-8 shadow-xl border border-stone-200">
+          <Brand />
+          <h1 className="mt-10 text-3xl font-semibold tracking-tight">Know what is safe to spend.</h1>
+          <p className="mt-3 text-stone-500 leading-relaxed">A private household cash-flow view. Your data stays behind your Val Town account.</p>
+          <a href="/auth/login" className="mt-8 block rounded-xl bg-green-900 px-5 py-3 text-center font-medium text-white hover:bg-green-800">Log in with Val Town</a>
+        </div>
+      </Centered>
+    );
+  }
+  if (!session.authorized) {
+    return <Centered><div className="max-w-md text-center"><Brand /><h1 className="mt-8 text-2xl font-semibold">Account not authorized</h1><p className="mt-2 text-stone-500">Signed in as {session.username}. Only the app owner and explicitly allowed family accounts can access this data.</p><Logout /></div></Centered>;
+  }
+  if (!data) return <Centered><Spinner label="Calculating cash flow…" /></Centered>;
+
+  return (
+    <div className="min-h-screen bg-stone-50">
+      <header className="sticky top-0 z-20 border-b border-stone-200 bg-stone-50 bg-opacity-95 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
+          <Brand />
+          <div className="flex items-center gap-3">
+            <span className="hidden text-sm text-stone-500 sm:block">{session.username}</span>
+            <Logout compact />
+          </div>
+        </div>
+        <nav className="mx-auto flex max-w-6xl gap-1 overflow-x-auto px-3 sm:px-5" aria-label="Budget sections">
+          {nav.map((item) => (
+            <button key={item.id} onClick={() => setView(item.id)} className={`whitespace-nowrap border-b-2 px-3 py-3 text-sm font-medium transition-colors ${view === item.id ? "border-green-800 text-green-900" : "border-transparent text-stone-500 hover:text-stone-900"}`}>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      <main className="mx-auto max-w-6xl px-4 py-6 pb-20 sm:px-6 sm:py-10">
+        {error && <div role="alert" className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss">×</button></div>}
+        {data.accounts.length === 0 ? (
+          <EmptyStart busy={busy} onDemo={() => mutate("/api/demo", "POST")} onAccount={() => setEditor({ type: "account" })} />
+        ) : view === "overview" ? (
+          <Overview data={data} onAddTransaction={() => setEditor({ type: "transaction" })} onAddPlanned={() => setEditor({ type: "planned" })} />
+        ) : view === "activity" ? (
+          <Activity data={data} onAdd={() => setEditor({ type: "transaction" })} onEdit={(item) => setEditor({ type: "transaction", item })} onDelete={(id) => confirmed("Delete this transaction and reverse its balance effect?") && mutate(`/api/transactions/${id}`, "DELETE")} />
+        ) : view === "planned" ? (
+          <Planned data={data} onAdd={() => setEditor({ type: "planned" })} onEdit={(item) => setEditor({ type: "planned", item })} onComplete={(item) => mutate(`/api/planned/${item.id}/complete`, "POST", { date: today(), accountId: item.accountId ?? data.accounts[0]?.id })} onDelete={(id) => confirmed("Delete this planned item?") && mutate(`/api/planned/${id}`, "DELETE")} />
+        ) : view === "reserves" ? (
+          <Reserves data={data} onAdd={() => setEditor({ type: "reserve" })} onEdit={(item) => setEditor({ type: "reserve", item })} onDelete={(id) => confirmed("Delete this reserve?") && mutate(`/api/reserves/${id}`, "DELETE")} />
+        ) : (
+          <Accounts data={data} onAdd={() => setEditor({ type: "account" })} onEdit={(item) => setEditor({ type: "account", item })} onDelete={(id) => confirmed("Delete this empty account?") && mutate(`/api/accounts/${id}`, "DELETE")} />
+        )}
+      </main>
+
+      {editor && (
+        <EditorModal editor={editor} data={data} busy={busy} onClose={() => setEditor(null)} onSave={async (payload) => {
+          const item = editor.item;
+          const base = editor.type === "transaction" ? "/api/transactions" : editor.type === "planned" ? "/api/planned" : editor.type === "reserve" ? "/api/reserves" : "/api/accounts";
+          await mutate(item ? `${base}/${item.id}` : base, item ? "PUT" : "POST", payload);
+        }} />
+      )}
+      <footer className="mx-auto max-w-6xl px-6 pb-8 text-center text-xs text-stone-400"><a className="hover:text-stone-600" href="/source">View source</a></footer>
+    </div>
+  );
+}
+
+function Overview({ data, onAddTransaction, onAddPlanned }: { data: AppData; onAddTransaction: () => void; onAddPlanned: () => void }) {
+  const d = data.dashboard;
+  return (
+    <div>
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div><p className="text-sm font-medium text-stone-500">HOUSEHOLD CASH FLOW</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">Your money this month</h1><p className="mt-2 text-sm text-stone-500">As of {prettyDate(d.asOfDate)}</p></div>
+        <div className="flex gap-2"><Button secondary onClick={onAddPlanned}>Plan ahead</Button><Button onClick={onAddTransaction}>Add transaction</Button></div>
+      </div>
+
+      <section className={`mt-7 overflow-hidden rounded-3xl p-6 text-white shadow-lg sm:p-8 ${d.safeToSpendCents < 0 ? "bg-red-900" : "bg-green-950"}`}>
+        <p className="text-sm font-medium uppercase tracking-widest text-green-100">Safe to spend</p>
+        <p className="mt-3 text-5xl font-semibold tracking-tight sm:text-6xl">{money(d.safeToSpendCents)}</p>
+        <p className="mt-4 max-w-2xl text-sm leading-relaxed text-green-100">Cash now, plus expected income, minus unpaid commitments and protected reserves through {prettyDate(d.monthEnd)}.</p>
+      </section>
+
+      <section className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Metric label="Cash now" value={d.currentCashCents} />
+        <Metric label="Spent this month" value={d.spentThisMonthCents} />
+        <Metric label="Still coming in" value={d.remainingIncomeCents} positive />
+        <Metric label="Still committed" value={d.remainingExpensesCents} negative />
+      </section>
+
+      <div className="mt-7 grid gap-5 lg:grid-cols-3">
+        <section className="rounded-2xl border border-stone-200 bg-white p-5 lg:col-span-2">
+          <SectionTitle title="Upcoming this month" subtitle={`${d.upcoming.length} expected item${d.upcoming.length === 1 ? "" : "s"}`} />
+          <div className="mt-4 divide-y divide-stone-100">
+            {d.upcoming.length === 0 ? <EmptyLine>Nothing else is planned this month.</EmptyLine> : d.upcoming.slice(0, 8).map((item, index) => (
+              <div key={`${item.plannedTransactionId}-${item.date}-${index}`} className="flex items-center gap-3 py-3">
+                <DateBadge date={item.date} />
+                <div className="min-w-0 flex-1"><p className="truncate font-medium">{item.description}</p><p className="text-xs capitalize text-stone-400">{item.kind}</p></div>
+                <Amount cents={item.kind === "expense" ? -item.amountCents : item.amountCents} />
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="rounded-2xl border border-stone-200 bg-white p-5">
+          <SectionTitle title="Month-end view" />
+          <div className="mt-5 space-y-4">
+            <SummaryRow label="Projected balance" cents={d.projectedMonthEndCents} strong />
+            <SummaryRow label="Protected" cents={-d.protectedReservesCents} />
+            <div className="border-t border-stone-200 pt-4"><SummaryRow label="Available after reserves" cents={d.safeToSpendCents} strong /></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function Activity({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Transaction) => void; onDelete: (id: string) => void }) {
+  const accounts = useMemo(() => Object.fromEntries(data.accounts.map((a) => [a.id, a.name])), [data.accounts]);
+  return <Page title="Activity" subtitle="Cleared income and expenses change account balances immediately." action="Add transaction" onAction={onAdd}><div className="divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.transactions.length === 0 ? <EmptyLine>No transactions yet.</EmptyLine> : data.transactions.map((item) => <ListRow key={item.id} title={item.description} meta={`${prettyDate(item.date)} · ${accounts[item.accountId] ?? "Unknown account"} · ${item.source}`} amount={item.amountCents} inactive={item.status === "pending"} onEdit={item.source === "manual" ? () => onEdit(item) : undefined} onDelete={item.source === "manual" ? () => onDelete(item.id) : undefined} />)}</div></Page>;
+}
+
+function Planned({ data, onAdd, onEdit, onComplete, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: PlannedTransaction) => void; onComplete: (item: PlannedTransaction) => void; onDelete: (id: string) => void }) {
+  return <Page title="Planned cash flow" subtitle="Unpaid and overdue occurrences are included until you mark them complete." action="Add planned item" onAction={onAdd}><div className="grid gap-3">{data.plannedTransactions.length === 0 ? <Card><EmptyLine>No planned items yet.</EmptyLine></Card> : data.plannedTransactions.map((item) => <div key={item.id} className={`rounded-2xl border bg-white p-4 sm:p-5 ${item.isActive ? "border-stone-200" : "border-stone-100 opacity-60"}`}><div className="flex items-start gap-4"><DateBadge date={item.nextDate} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">{item.description}</h3><Badge>{item.recurrence === "once" ? "One-off" : `Every ${item.intervalCount > 1 ? `${item.intervalCount} ` : ""}${item.recurrence.replace("ly", "")}${item.intervalCount > 1 ? "s" : ""}`}</Badge>{!item.isActive && <Badge>Inactive</Badge>}</div><p className="mt-1 text-sm text-stone-500">Next: {prettyDate(item.nextDate)}</p></div><Amount cents={item.kind === "expense" ? -item.amountCents : item.amountCents} /></div><div className="mt-4 flex flex-wrap justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton>{item.isActive && <SmallButton primary onClick={() => onComplete(item)}>Mark {item.kind === "expense" ? "paid" : "received"}</SmallButton>}</div></div>)}</div></Page>;
+}
+
+function Reserves({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Reserve) => void; onDelete: (id: string) => void }) {
+  return <Page title="Protected reserves" subtitle="This money remains in your accounts but is excluded from safe-to-spend." action="Add reserve" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2">{data.reserves.length === 0 ? <Card><EmptyLine>No reserves yet.</EmptyLine></Card> : data.reserves.map((item) => <Card key={item.id} inactive={!item.isActive}><div className="flex items-start justify-between gap-4"><div><h3 className="font-semibold">{item.name}</h3><p className="mt-1 text-sm text-stone-500">{item.note || "Protected funds"}</p></div><p className="text-xl font-semibold">{money(item.amountCents)}</p></div><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div></Page>;
+}
+
+function Accounts({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Account) => void; onDelete: (id: string) => void }) {
+  return <Page title="Accounts" subtitle="Balances are your current cleared balances, not opening balances." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div></Page>;
+}
+
+function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNullable<Editor>; data: AppData; busy: boolean; onClose: () => void; onSave: (payload: unknown) => Promise<void> }) {
+  const item = editor.item;
+  const baseDate = today();
+  const initial = item ? itemToForm(editor.type, item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", amount: "", note: "", isActive: true };
+  const [form, setForm] = useState<Record<string, string | boolean>>(initial);
+  const [formError, setFormError] = useState("");
+  const set = (key: string) => (event: FormEvent<Element>) => {
+    const target = event.currentTarget as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+    setForm((current) => ({ ...current, [key]: target instanceof HTMLInputElement && target.type === "checkbox" ? target.checked : target.value }));
+  };
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setFormError("");
+    try {
+      const amountCents = "amount" in form ? parseMoney(String(form.amount), editor.type === "account") : undefined;
+      const payload = editor.type === "account" ? { name: form.name, type: form.type, balanceCents: amountCents, isActive: form.isActive ?? true }
+        : editor.type === "transaction" ? { description: form.description, kind: form.kind, amountCents, date: form.date, accountId: form.accountId }
+        : editor.type === "planned" ? { description: form.description, kind: form.kind, amountCents, nextDate: form.nextDate, recurrence: form.recurrence, intervalCount: Number(form.intervalCount), endDate: form.endDate || null, accountId: form.accountId || null, isActive: form.isActive ?? true }
+        : { name: form.name, amountCents, note: form.note, isActive: form.isActive ?? true };
+      await onSave(payload);
+    } catch (err) {
+      setFormError(messageOf(err));
+    }
+  };
+  const title = `${item ? "Edit" : "Add"} ${editor.type === "planned" ? "planned item" : editor.type}`;
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-stone-950 bg-opacity-50 p-0 sm:items-center sm:p-6" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="editor-title" className="max-h-screen w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl sm:max-w-lg sm:rounded-3xl sm:p-7">
+        <div className="flex items-center justify-between"><h2 id="editor-title" className="text-xl font-semibold capitalize">{title}</h2><button className="rounded-full p-2 text-xl text-stone-400 hover:bg-stone-100" onClick={onClose} aria-label="Close">×</button></div>
+        <form className="mt-6 grid gap-4" onSubmit={submit}>
+          {editor.type === "account" && <><Field label="Account name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><Field label="Account type"><select value={String(form.type)} onChange={set("type")} className={inputClass}><option value="checking">Checking</option><option value="savings">Savings</option><option value="cash">Cash</option></select></Field><MoneyField label="Current balance" value={String(form.balance)} onInput={set("balance")} allowNegative /></>}
+          {editor.type === "transaction" && <><Field label="Description"><input required maxLength={160} value={String(form.description)} onInput={set("description")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Type"><select value={String(form.kind)} onChange={set("kind")} className={inputClass}><option value="expense">Expense</option><option value="income">Income</option></select></Field><MoneyField label="Amount" value={String(form.amount)} onInput={set("amount")} /></div><Field label="Date"><input type="date" required value={String(form.date)} onInput={set("date")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} /></>}
+          {editor.type === "planned" && <><Field label="Description"><input required maxLength={160} value={String(form.description)} onInput={set("description")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Type"><select value={String(form.kind)} onChange={set("kind")} className={inputClass}><option value="expense">Expense</option><option value="income">Income</option></select></Field><MoneyField label="Amount" value={String(form.amount)} onInput={set("amount")} /></div><Field label="Next due date"><input type="date" required value={String(form.nextDate)} onInput={set("nextDate")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Repeats"><select value={String(form.recurrence)} onChange={set("recurrence")} className={inputClass}><option value="once">Once</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></Field><Field label="Every"><input type="number" min="1" max="99" required value={String(form.intervalCount)} onInput={set("intervalCount")} className={inputClass} /></Field></div><Field label="End date (optional)"><input type="date" value={String(form.endDate)} onInput={set("endDate")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} optional /></>}
+          {editor.type === "reserve" && <><Field label="Reserve name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><MoneyField label="Protected amount" value={String(form.amount)} onInput={set("amount")} /><Field label="Note (optional)"><textarea maxLength={300} rows={3} value={String(form.note)} onInput={set("note")} className={inputClass} /></Field></>}
+          {item && editor.type !== "transaction" && <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={Boolean(form.isActive)} onChange={set("isActive")} className="h-4 w-4 accent-green-800" /> Active</label>}
+          {formError && <p className="text-sm text-red-700">{formError}</p>}
+          <div className="mt-2 flex justify-end gap-2"><Button secondary type="button" onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save"}</Button></div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EmptyStart({ busy, onDemo, onAccount }: { busy: boolean; onDemo: () => void; onAccount: () => void }) {
+  return <div className="mx-auto max-w-xl rounded-3xl border border-stone-200 bg-white p-7 text-center sm:p-12"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-lime-200 text-2xl text-green-950">€</div><h1 className="mt-6 text-2xl font-semibold">Start with your current cash</h1><p className="mx-auto mt-3 max-w-md text-stone-500">Add a real account balance, or load clearly synthetic data to explore the workflow first.</p><div className="mt-7 flex flex-col justify-center gap-2 sm:flex-row"><Button onClick={onAccount}>Add account</Button><Button secondary onClick={onDemo} disabled={busy}>{busy ? "Loading…" : "Load synthetic demo"}</Button></div></div>;
+}
+
+function Page({ title, subtitle, action, onAction, children }: { title: string; subtitle: string; action: string; onAction: () => void; children: ReactNode }) {
+  return <div><div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><h1 className="text-3xl font-semibold tracking-tight">{title}</h1><p className="mt-2 text-sm text-stone-500">{subtitle}</p></div><Button onClick={onAction}>{action}</Button></div>{children}</div>;
+}
+
+function ListRow({ title, meta, amount, inactive, onEdit, onDelete }: { title: string; meta: string; amount: number; inactive?: boolean; onEdit?: () => void; onDelete?: () => void }) {
+  return <div className={`flex items-center gap-3 py-4 ${inactive ? "opacity-60" : ""}`}><div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-lg ${amount < 0 ? "bg-orange-50 text-orange-700" : "bg-green-50 text-green-700"}`}>{amount < 0 ? "−" : "+"}</div><div className="min-w-0 flex-1"><p className="truncate font-medium">{title}</p><p className="truncate text-xs text-stone-400">{meta}</p></div><Amount cents={amount} /><div className="flex"><button disabled={!onEdit} onClick={onEdit} className="px-2 py-1 text-xs text-stone-400 disabled:invisible">Edit</button><button disabled={!onDelete} onClick={onDelete} className="px-2 py-1 text-xs text-stone-400 hover:text-red-700 disabled:invisible">Delete</button></div></div>;
+}
+
+function Metric({ label, value, positive, negative }: { label: string; value: number; positive?: boolean; negative?: boolean }) {
+  return <div className="rounded-2xl border border-stone-200 bg-white p-4 sm:p-5"><p className="text-xs font-medium text-stone-500 sm:text-sm">{label}</p><p className={`mt-2 text-xl font-semibold sm:text-2xl ${positive ? "text-green-700" : negative ? "text-orange-700" : ""}`}>{money(value)}</p></div>;
+}
+function Card({ children, inactive }: { children: ReactNode; inactive?: boolean }) { return <div className={`rounded-2xl border border-stone-200 bg-white p-5 ${inactive ? "opacity-60" : ""}`}>{children}</div>; }
+function SectionTitle({ title, subtitle }: { title: string; subtitle?: string }) { return <div className="flex items-baseline justify-between gap-3"><h2 className="font-semibold">{title}</h2>{subtitle && <span className="text-xs text-stone-400">{subtitle}</span>}</div>; }
+function SummaryRow({ label, cents, strong }: { label: string; cents: number; strong?: boolean }) { return <div className="flex items-center justify-between gap-3"><span className={strong ? "font-medium" : "text-sm text-stone-500"}>{label}</span><span className={strong ? "font-semibold" : "text-sm"}>{money(cents)}</span></div>; }
+function Amount({ cents }: { cents: number }) { return <span className={`whitespace-nowrap font-semibold tabular-nums ${cents < 0 ? "text-stone-800" : "text-green-700"}`}>{cents > 0 ? "+" : ""}{money(cents)}</span>; }
+function DateBadge({ date }: { date: string }) { const parsed = new Date(`${date}T12:00:00Z`); return <div className="flex h-11 w-11 shrink-0 flex-col items-center justify-center rounded-xl bg-stone-100 leading-none"><span className="text-[10px] font-semibold uppercase text-stone-400">{parsed.toLocaleDateString("en", { month: "short", timeZone: "UTC" })}</span><span className="mt-1 text-sm font-semibold">{parsed.getUTCDate()}</span></div>; }
+function Badge({ children }: { children: ReactNode }) { return <span className="rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-stone-500">{children}</span>; }
+function EmptyLine({ children }: { children: ReactNode }) { return <p className="py-8 text-center text-sm text-stone-400">{children}</p>; }
+function Centered({ children }: { children: ReactNode }) { return <main className="flex min-h-screen items-center justify-center bg-stone-100 p-5">{children}</main>; }
+function Spinner({ label }: { label: string }) { return <div className="text-center"><div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-stone-300 border-t-green-800" /><p className="mt-4 text-sm text-stone-500">{label}</p></div>; }
+function Brand() { return <div className="flex items-center gap-3"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-green-950 font-semibold text-lime-200">€</span><span className="font-semibold tracking-tight">BudgetApp</span></div>; }
+function Logout({ compact }: { compact?: boolean }) { return <form method="POST" action="/auth/logout" className={compact ? "mt-0" : "mt-6"}><button className="rounded-lg border border-stone-200 px-3 py-2 text-sm text-stone-500 hover:bg-white">Log out</button></form>; }
+function Button({ children, secondary, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { secondary?: boolean }) { return <button {...props} className={`rounded-xl px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${secondary ? "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50" : "bg-green-900 text-white hover:bg-green-800"}`}>{children}</button>; }
+function SmallButton({ children, primary, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { primary?: boolean }) { return <button {...props} className={`rounded-lg px-3 py-2 text-xs font-medium ${primary ? "bg-green-900 text-white" : "bg-stone-100 text-stone-600 hover:bg-stone-200"}`}>{children}</button>; }
+function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="grid gap-1.5 text-sm font-medium text-stone-700"><span>{label}</span>{children}</label>; }
+function MoneyField({ label, value, onInput, allowNegative }: { label: string; value: string; onInput: (event: FormEvent<Element>) => void; allowNegative?: boolean }) { return <Field label={label}><div className="relative"><span className="absolute left-3 top-2.5 text-stone-400">€</span><input inputMode="decimal" required pattern={allowNegative ? "-?[0-9]+([.,][0-9]{1,2})?" : "[0-9]+([.,][0-9]{1,2})?"} placeholder="0.00" value={value} onInput={onInput} className={`${inputClass} pl-8`} /></div></Field>; }
+function AccountSelect({ accounts, value, onChange, optional }: { accounts: Account[]; value: string; onChange: (event: FormEvent<Element>) => void; optional?: boolean }) { return <Field label={`Account${optional ? " (optional)" : ""}`}><select required={!optional} value={value} onChange={onChange} className={inputClass}>{optional && <option value="">Choose when paid</option>}{accounts.filter((a) => a.isActive || a.id === value).map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></Field>; }
+
+const inputClass = "w-full box-border rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-base outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100";
+
+function itemToForm(type: NonNullable<Editor>["type"], item: Account | Transaction | PlannedTransaction | Reserve): Record<string, string | boolean> {
+  if (type === "account") { const a = item as Account; return { name: a.name, type: a.type, balance: euros(a.balanceCents), isActive: a.isActive }; }
+  if (type === "transaction") { const t = item as Transaction; return { description: t.description, kind: t.kind, amount: euros(Math.abs(t.amountCents)), date: t.date, accountId: t.accountId }; }
+  if (type === "planned") { const p = item as PlannedTransaction; return { description: p.description, kind: p.kind, amount: euros(p.amountCents), nextDate: p.nextDate, recurrence: p.recurrence, intervalCount: String(p.intervalCount), endDate: p.endDate ?? "", accountId: p.accountId ?? "", isActive: p.isActive }; }
+  const r = item as Reserve; return { name: r.name, amount: euros(r.amountCents), note: r.note, isActive: r.isActive };
+}
+
+async function api<T = unknown>(path: string, init?: RequestInit, requireOk = true): Promise<T> {
+  const response = await fetch(path, { ...init, headers: { "Content-Type": "application/json", "X-BudgetApp-Request": "1", ...(init?.headers ?? {}) } });
+  const body = response.status === 204 ? null : await response.json().catch(() => null);
+  if (requireOk && !response.ok) throw new Error(body?.error ?? `Request failed (${response.status})`);
+  return body as T;
+}
+
+function parseMoney(raw: string, allowNegative = false): number {
+  const normalized = raw.trim().replace(",", ".");
+  if (!(allowNegative ? /^-?\d+(?:\.\d{1,2})?$/ : /^\d+(?:\.\d{1,2})?$/).test(normalized)) throw new Error("Enter a valid amount with at most two decimals");
+  const negative = normalized.startsWith("-");
+  const [whole, decimal = ""] = normalized.replace("-", "").split(".");
+  const cents = Number(BigInt(whole) * 100n + BigInt(decimal.padEnd(2, "0")));
+  if (!Number.isSafeInteger(cents)) throw new Error("Amount is too large");
+  return negative ? -cents : cents;
+}
+function money(cents: number): string { return new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(cents / 100); }
+function euros(cents: number): string { return `${cents < 0 ? "-" : ""}${Math.floor(Math.abs(cents) / 100)}.${String(Math.abs(cents) % 100).padStart(2, "0")}`; }
+function today(): string { return householdDate(); }
+function prettyDate(date: string): string { return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }); }
+function messageOf(error: unknown): string { return error instanceof Error ? error.message : "Something went wrong"; }
+function confirmed(message: string): boolean { return window.confirm(message); }
