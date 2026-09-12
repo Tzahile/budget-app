@@ -2,7 +2,7 @@
 
 BudgetApp is one Val Town project and one deployment:
 
-- `index.ts`: Hono HTTP entrypoint, authorization, validation, API routes.
+- `index.http.ts`: Hono HTTP entrypoint, authorization, validation, API routes.
 - `frontend/`: client-side React 18 UI based on Val Town's official React +
   Hono starter conventions. Assets use immutable versioned URLs.
 - `server/`: idempotent SQLite schema and transactional repository operations.

@@ -34,7 +34,7 @@ npm run check
 The deployed module graph can also be checked with Deno:
 
 ```sh
-deno check --allow-import=esm.town,esm.sh index.ts frontend/index.tsx
+deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx
 ```
 
 No real financial data, statements or credentials belong in this repository.

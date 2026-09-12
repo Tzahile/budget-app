@@ -33,7 +33,7 @@ jobs:
           deno-version: v2.x
 
       - name: Check Val Town modules
-        run: deno check --allow-import=esm.town,esm.sh index.ts frontend/index.tsx
+        run: deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx
 
       - name: Install vt CLI
         run: deno install -gArf jsr:@valtown/vt@0.1.56
