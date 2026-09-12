@@ -47,7 +47,7 @@ declare module "https://esm.town/v/std/oauth/middleware.ts" {
 }
 
 declare module "https://esm.town/v/std/sqlite/main.ts" {
-  interface Statement { sql: string; args?: unknown[] }
+  interface Statement { sql: string; args?: (string | number | null)[] }
   interface Result { rows: Record<string, unknown>[]; rowsAffected: number }
   export const sqlite: {
     execute(statement: string | Statement): Promise<Result>;

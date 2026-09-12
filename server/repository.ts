@@ -241,7 +241,7 @@ export async function seedDemoData(today = householdDate()): Promise<boolean> {
   return true;
 }
 
-async function one(sql: string, args: unknown[]): Promise<Row | null> {
+async function one(sql: string, args: (string | number | null)[]): Promise<Row | null> {
   const result = await db.execute({ sql, args });
   return (result.rows[0] as Row | undefined) ?? null;
 }
