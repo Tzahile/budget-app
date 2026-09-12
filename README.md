@@ -46,14 +46,14 @@ app and runs `vt push` on every push.
 
 Initial setup:
 
-1. Create the Val from this checkout with the official `vt` CLI. Commit the
-   generated `.vt/state.json`; it contains project identity, not the token.
-2. Store a val read/write token as the GitHub Actions secret
+1. Store a val read/write token as the GitHub Actions secret
    `VAL_TOWN_API_KEY`.
+2. Push to `main`. The first workflow run creates the private `budget-app` val,
+   deploys it and commits its non-secret `.vt/state.json` project identity.
 3. Optionally set `BUDGET_APP_ALLOWED_USERS` in the Val Town environment to a
    comma-separated list of additional family Val Town usernames. The val owner
    is always allowed.
-4. Push to `main`; the workflow tests and deploys the exact Git revision.
+4. Later pushes test and deploy the exact Git revision.
 
 Never edit production code only in the Val Town web editor: the next GitHub
 deployment intentionally overwrites it.
