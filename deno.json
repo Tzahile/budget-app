@@ -1,0 +1,11 @@
+{
+  "nodeModulesDir": "auto",
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitOverride": true
+  },
+  "imports": {
+    "hono": "npm:hono@4.9.2"
+  },
+  "exclude": ["node_modules", "tests"]
+}

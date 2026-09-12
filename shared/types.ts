@@ -1,0 +1,89 @@
+export type AccountType = "checking" | "savings" | "cash";
+export type TransactionKind = "income" | "expense" | "refund" | "transfer";
+export type TransactionStatus = "cleared" | "pending";
+export type Recurrence = "once" | "weekly" | "monthly" | "yearly";
+export type PlannedKind = "income" | "expense";
+
+export interface Account {
+  id: string;
+  name: string;
+  type: AccountType;
+  currency: string;
+  balanceCents: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Transaction {
+  id: string;
+  accountId: string;
+  date: string;
+  amountCents: number;
+  currency: string;
+  description: string;
+  kind: TransactionKind;
+  status: TransactionStatus;
+  source: "manual" | "import" | "planned";
+  transferGroupId: string | null;
+  plannedTransactionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlannedTransaction {
+  id: string;
+  accountId: string | null;
+  description: string;
+  kind: PlannedKind;
+  amountCents: number;
+  currency: string;
+  recurrence: Recurrence;
+  intervalCount: number;
+  nextDate: string;
+  endDate: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Reserve {
+  id: string;
+  name: string;
+  amountCents: number;
+  currency: string;
+  note: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlannedOccurrence {
+  plannedTransactionId: string;
+  description: string;
+  kind: PlannedKind;
+  amountCents: number;
+  date: string;
+}
+
+export interface DashboardSummary {
+  asOfDate: string;
+  monthStart: string;
+  monthEnd: string;
+  currentCashCents: number;
+  spentThisMonthCents: number;
+  remainingIncomeCents: number;
+  remainingExpensesCents: number;
+  protectedReservesCents: number;
+  projectedMonthEndCents: number;
+  safeToSpendCents: number;
+  upcoming: PlannedOccurrence[];
+}
+
+export interface AppData {
+  dashboard: DashboardSummary;
+  accounts: Account[];
+  transactions: Transaction[];
+  plannedTransactions: PlannedTransaction[];
+  reserves: Reserve[];
+}
