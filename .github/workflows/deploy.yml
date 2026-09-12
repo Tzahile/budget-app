@@ -43,7 +43,7 @@ jobs:
         env:
           VAL_TOWN_API_KEY: ${{ secrets.VAL_TOWN_API_KEY }}
         run: |
-          vt create budget-app "$RUNNER_TEMP/budget-app-val" --private --no-editor-files --org-name me
+          vt create budget-app "$RUNNER_TEMP/budget-app-val" --public --no-editor-files --org-name me
           mkdir -p .vt
           cp "$RUNNER_TEMP/budget-app-val/.vt/state.json" .vt/state.json
           echo "VT_BOOTSTRAPPED=1" >> "$GITHUB_ENV"

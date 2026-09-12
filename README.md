@@ -48,8 +48,9 @@ Initial setup:
 
 1. Store a val read/write token as the GitHub Actions secret
    `VAL_TOWN_API_KEY`.
-2. Push to `main`. The first workflow run creates the private `budget-app` val,
-   deploys it and commits its non-secret `.vt/state.json` project identity.
+2. Push to `main`. The first workflow run creates the public-code `budget-app`
+   val, deploys it and commits its non-secret `.vt/state.json` project identity.
+   Financial API routes remain protected by OAuth and owner allowlisting.
 3. Optionally set `BUDGET_APP_ALLOWED_USERS` in the Val Town environment to a
    comma-separated list of additional family Val Town usernames. The val owner
    is always allowed.
