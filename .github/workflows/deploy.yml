@@ -53,6 +53,26 @@ jobs:
           VAL_TOWN_API_KEY: ${{ secrets.VAL_TOWN_API_KEY }}
         run: vt push
 
+      - name: Ensure HTTP trigger and remove ignored remote files
+        env:
+          VAL_TOWN_API_KEY: ${{ secrets.VAL_TOWN_API_KEY }}
+        run: |
+          VAL_ID=$(jq -r '.val.id' .vt/state.json)
+          BRANCH_ID=$(jq -r '.branch.id' .vt/state.json)
+          API="https://api.val.town/v2/vals/$VAL_ID/files"
+
+          for path in .gitignore README.md ROADMAP.md deno.lock index.ts types; do
+            curl --silent --show-error --request DELETE \
+              --header "Authorization: Bearer $VAL_TOWN_API_KEY" \
+              "$API?path=$path&recursive=true&branch_id=$BRANCH_ID" >/dev/null
+          done
+
+          curl --fail-with-body --silent --show-error --request PUT \
+            --header "Authorization: Bearer $VAL_TOWN_API_KEY" \
+            --header "Content-Type: application/json" \
+            --data '{"type":"http"}' \
+            "$API?path=index.http.ts&branch_id=$BRANCH_ID" >/dev/null
+
       - name: Persist Val Town project identity
         if: env.VT_BOOTSTRAPPED == '1'
         run: |
