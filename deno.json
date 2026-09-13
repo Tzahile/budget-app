@@ -5,7 +5,7 @@
     "noImplicitOverride": true
   },
   "imports": {
-    "hono": "npm:hono@4.9.2"
+    "hono": "npm:hono@4.13.7"
   },
   "exclude": ["node_modules", "tests"]
 }

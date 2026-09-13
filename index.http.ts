@@ -1,5 +1,5 @@
 // Val Town infers the HTTP trigger from the `.http.ts` filename.
-import { Hono } from "npm:hono@4.9.2";
+import { Hono } from "npm:hono@4.13.7";
 import { getOAuthUserData, oauthMiddleware } from "https://esm.town/v/std/oauth/middleware.ts";
 import { parseVal, serveImmutableFile } from "https://esm.town/v/std/utils/index.ts";
 import { assertDateOnly, householdDate } from "./shared/finance.ts";

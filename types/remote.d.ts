@@ -17,7 +17,7 @@ declare module "https://esm.sh/react-dom@18.2.0/client" {
   export const createRoot: typeof import("react-dom/client").createRoot;
 }
 
-declare module "npm:hono@4.9.2" {
+declare module "npm:hono@4.13.7" {
   export { Hono } from "hono";
 }
 

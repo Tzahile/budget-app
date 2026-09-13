@@ -10,12 +10,12 @@
     "check": "npm run test && npm run typecheck"
   },
   "dependencies": {
-    "hono": "4.9.2"
+    "hono": "4.13.7"
   },
   "devDependencies": {
     "@types/react": "^18.3.24",
     "@types/react-dom": "^18.3.7",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "vitest": "^5.0.0"
   }
 }
