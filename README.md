@@ -12,7 +12,7 @@ committed this month, what is protected, and what remains safe to spend.
 - accounts and current balances
 - manual income and expenses with edit/delete balance reversal
 - recurring and one-off planned income/expenses
-- mark planned items paid/received
+- mark planned items paid/received, then safely undo or correct the latest completion
 - protected reserves
 - projected month-end and safe-to-spend dashboard
 - responsive mobile/desktop React UI

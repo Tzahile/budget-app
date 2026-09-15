@@ -1,7 +1,7 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
 import { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@18.2.0";
 import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/react@18.2.0";
-import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
+import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedCompletion, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
 import { householdDate } from "../../shared/finance.ts";
 
 type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
@@ -10,6 +10,7 @@ type Editor =
   | { type: "transaction"; item?: Transaction }
   | { type: "planned"; item?: PlannedTransaction }
   | { type: "reserve"; item?: Reserve }
+  | { type: "correction"; item: PlannedCompletion }
   | null;
 
 interface Session {
@@ -126,7 +127,7 @@ export function App() {
         ) : view === "activity" ? (
           <Activity data={data} onAdd={() => setEditor({ type: "transaction" })} onEdit={(item) => setEditor({ type: "transaction", item })} onDelete={(id) => confirmed("Delete this transaction and reverse its balance effect?") && mutate(`/api/transactions/${id}`, "DELETE")} />
         ) : view === "planned" ? (
-          <Planned data={data} onAdd={() => setEditor({ type: "planned" })} onEdit={(item) => setEditor({ type: "planned", item })} onComplete={(item) => mutate(`/api/planned/${item.id}/complete`, "POST", { date: today(), accountId: item.accountId ?? data.accounts[0]?.id })} onDelete={(id) => confirmed("Delete this planned item?") && mutate(`/api/planned/${id}`, "DELETE")} />
+          <Planned data={data} onAdd={() => setEditor({ type: "planned" })} onEdit={(item) => setEditor({ type: "planned", item })} onComplete={(item) => mutate(`/api/planned/${item.id}/complete`, "POST", { date: today(), accountId: item.accountId ?? data.accounts[0]?.id })} onUndo={(item) => confirmed("Undo this completion and restore the unpaid occurrence?") && mutate(`/api/planned-completions/${item.id}/undo`, "POST", { expectedEffectiveTransactionId: item.effectiveTransaction!.id })} onCorrect={(item) => setEditor({ type: "correction", item })} onDeactivate={(id) => confirmed("Deactivate this planned item while preserving its history?") && mutate(`/api/planned/${id}/deactivate`, "POST")} onDelete={(id) => confirmed("Delete this planned item?") && mutate(`/api/planned/${id}`, "DELETE")} />
         ) : view === "reserves" ? (
           <Reserves data={data} onAdd={() => setEditor({ type: "reserve" })} onEdit={(item) => setEditor({ type: "reserve", item })} onDelete={(id) => confirmed("Delete this reserve?") && mutate(`/api/reserves/${id}`, "DELETE")} />
         ) : (
@@ -137,6 +138,13 @@ export function App() {
       {editor && (
         <EditorModal editor={editor} data={data} busy={busy} onClose={() => setEditor(null)} onSave={async (payload) => {
           const item = editor.item;
+          if (editor.type === "correction") {
+            await mutate(`/api/planned-completions/${editor.item.id}/correct`, "POST", {
+              ...(payload as Record<string, unknown>),
+              expectedEffectiveTransactionId: editor.item.effectiveTransaction!.id,
+            });
+            return;
+          }
           const base = editor.type === "transaction" ? "/api/transactions" : editor.type === "planned" ? "/api/planned" : editor.type === "reserve" ? "/api/reserves" : "/api/accounts";
           await mutate(item ? `${base}/${item.id}` : base, item ? "PUT" : "POST", payload);
         }} />
@@ -205,8 +213,9 @@ function Activity({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () 
   return <Page title="Activity" subtitle="Cleared income and expenses change account balances immediately." action="Add transaction" onAction={onAdd}><div className="divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.transactions.length === 0 ? <EmptyLine>No transactions yet.</EmptyLine> : data.transactions.map((item) => <ListRow key={item.id} title={item.description} meta={`${prettyDate(item.date)} · ${accounts[item.accountId] ?? "Unknown account"} · ${item.source}`} amount={item.amountCents} inactive={item.status === "pending"} onEdit={item.source === "manual" ? () => onEdit(item) : undefined} onDelete={item.source === "manual" ? () => onDelete(item.id) : undefined} />)}</div></Page>;
 }
 
-function Planned({ data, onAdd, onEdit, onComplete, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: PlannedTransaction) => void; onComplete: (item: PlannedTransaction) => void; onDelete: (id: string) => void }) {
-  return <Page title="Planned cash flow" subtitle="Unpaid and overdue occurrences are included until you mark them complete." action="Add planned item" onAction={onAdd}><div className="grid gap-3">{data.plannedTransactions.length === 0 ? <Card><EmptyLine>No planned items yet.</EmptyLine></Card> : data.plannedTransactions.map((item) => <div key={item.id} className={`rounded-2xl border bg-white p-4 sm:p-5 ${item.isActive ? "border-stone-200" : "border-stone-100 opacity-60"}`}><div className="flex items-start gap-4"><DateBadge date={item.nextDate} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">{item.description}</h3><Badge>{item.recurrence === "once" ? "One-off" : `Every ${item.intervalCount > 1 ? `${item.intervalCount} ` : ""}${item.recurrence.replace("ly", "")}${item.intervalCount > 1 ? "s" : ""}`}</Badge>{!item.isActive && <Badge>Inactive</Badge>}</div><p className="mt-1 text-sm text-stone-500">Next: {prettyDate(item.nextDate)}</p></div><Amount cents={item.kind === "expense" ? -item.amountCents : item.amountCents} /></div><div className="mt-4 flex flex-wrap justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton>{item.isActive && <SmallButton primary onClick={() => onComplete(item)}>Mark {item.kind === "expense" ? "paid" : "received"}</SmallButton>}</div></div>)}</div></Page>;
+function Planned({ data, onAdd, onEdit, onComplete, onUndo, onCorrect, onDeactivate, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: PlannedTransaction) => void; onComplete: (item: PlannedTransaction) => void; onUndo: (item: PlannedCompletion) => void; onCorrect: (item: PlannedCompletion) => void; onDeactivate: (id: string) => void; onDelete: (id: string) => void }) {
+  const accounts = useMemo(() => Object.fromEntries(data.accounts.map((a) => [a.id, a.name])), [data.accounts]);
+  return <Page title="Planned cash flow" subtitle="Unpaid and overdue occurrences are included until you mark them complete." action="Add planned item" onAction={onAdd}><div className="grid gap-3">{data.plannedTransactions.length === 0 ? <Card><EmptyLine>No planned items yet.</EmptyLine></Card> : data.plannedTransactions.map((item) => { const hasHistory = data.plannedCompletions.some((completion) => completion.plannedTransactionId === item.id); return <div key={item.id} className={`rounded-2xl border bg-white p-4 sm:p-5 ${item.isActive ? "border-stone-200" : "border-stone-100 opacity-60"}`}><div className="flex items-start gap-4"><DateBadge date={item.nextDate} /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">{item.description}</h3><Badge>{item.recurrence === "once" ? "One-off" : `Every ${item.intervalCount > 1 ? `${item.intervalCount} ` : ""}${item.recurrence.replace("ly", "")}${item.intervalCount > 1 ? "s" : ""}`}</Badge>{!item.isActive && <Badge>Inactive</Badge>}</div><p className="mt-1 text-sm text-stone-500">Next: {prettyDate(item.nextDate)}</p></div><Amount cents={item.kind === "expense" ? -item.amountCents : item.amountCents} /></div><div className="mt-4 flex flex-wrap justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton>{hasHistory ? item.isActive && <SmallButton onClick={() => onDeactivate(item.id)}>Deactivate</SmallButton> : <SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton>}{item.isActive && <SmallButton primary onClick={() => onComplete(item)}>Mark {item.kind === "expense" ? "paid" : "received"}</SmallButton>}</div></div>; })}</div>{data.plannedCompletions.length > 0 && <section className="mt-8"><SectionTitle title="Completion history" subtitle="Original records are retained for audit" /><div className="mt-3 divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.plannedCompletions.map((completion) => { const transaction = completion.effectiveTransaction; const original = completion.originalTransaction; return <div key={completion.id} className="flex flex-wrap items-center gap-3 py-4"><div className="min-w-0 flex-1"><p className="truncate font-medium">{transaction?.description ?? original.description}</p><p className="truncate text-xs text-stone-400">{completion.status} · due {prettyDate(completion.occurrenceDate)}{transaction ? ` · effective ${prettyDate(transaction.date)} · ${accounts[transaction.accountId] ?? "Unknown account"}` : ""}</p>{completion.status !== "completed" && <p className="mt-1 truncate text-xs text-stone-400">Original: {prettyDate(original.date)} · {accounts[original.accountId] ?? "Unknown account"} · {money(original.amountCents)}</p>}</div>{transaction && <Amount cents={transaction.amountCents} />}{completion.adjustable && <div className="flex gap-1"><SmallButton onClick={() => onCorrect(completion)}>Correct</SmallButton><SmallButton onClick={() => onUndo(completion)}>Undo</SmallButton></div>}</div>; })}</div></section>}</Page>;
 }
 
 function Reserves({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Reserve) => void; onDelete: (id: string) => void }) {
@@ -220,7 +229,7 @@ function Accounts({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () 
 function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNullable<Editor>; data: AppData; busy: boolean; onClose: () => void; onSave: (payload: unknown) => Promise<void> }) {
   const item = editor.item;
   const baseDate = today();
-  const initial = item ? itemToForm(editor.type, item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", amount: "", note: "", isActive: true };
+  const initial = editor.type === "correction" ? { amount: euros(Math.abs(editor.item.effectiveTransaction?.amountCents ?? 0)), date: editor.item.effectiveTransaction?.date ?? baseDate, accountId: editor.item.effectiveTransaction?.accountId ?? data.accounts[0]?.id ?? "" } : editor.item ? itemToForm(editor.type, editor.item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", amount: "", note: "", isActive: true };
   const [form, setForm] = useState<Record<string, string | boolean>>(initial);
   const [formError, setFormError] = useState("");
   const set = (key: string) => (event: FormEvent<Element>) => {
@@ -234,7 +243,8 @@ function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNulla
       const amountCents = editor.type === "account"
         ? parseMoney(String(form.balance), true)
         : parseMoney(String(form.amount));
-      const payload = editor.type === "account" ? { name: form.name, type: form.type, balanceCents: amountCents, isActive: form.isActive ?? true }
+      const payload = editor.type === "correction" ? { amountCents, date: form.date, accountId: form.accountId }
+        : editor.type === "account" ? { name: form.name, type: form.type, balanceCents: amountCents, isActive: form.isActive ?? true }
         : editor.type === "transaction" ? { description: form.description, kind: form.kind, amountCents, date: form.date, accountId: form.accountId }
         : editor.type === "planned" ? { description: form.description, kind: form.kind, amountCents, nextDate: form.nextDate, recurrence: form.recurrence, intervalCount: Number(form.intervalCount), endDate: form.endDate || null, accountId: form.accountId || null, isActive: form.isActive ?? true }
         : { name: form.name, amountCents, note: form.note, isActive: form.isActive ?? true };
@@ -243,7 +253,7 @@ function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNulla
       setFormError(messageOf(err));
     }
   };
-  const title = `${item ? "Edit" : "Add"} ${editor.type === "planned" ? "planned item" : editor.type}`;
+  const title = editor.type === "correction" ? "Correct completion" : `${item ? "Edit" : "Add"} ${editor.type === "planned" ? "planned item" : editor.type}`;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-stone-950 bg-opacity-50 p-0 sm:items-center sm:p-6" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div role="dialog" aria-modal="true" aria-labelledby="editor-title" className="max-h-screen w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl sm:max-w-lg sm:rounded-3xl sm:p-7">
@@ -252,8 +262,9 @@ function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNulla
           {editor.type === "account" && <><Field label="Account name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><Field label="Account type"><select value={String(form.type)} onChange={set("type")} className={inputClass}><option value="checking">Checking</option><option value="savings">Savings</option><option value="cash">Cash</option></select></Field><MoneyField label="Current balance" value={String(form.balance)} onInput={set("balance")} allowNegative /></>}
           {editor.type === "transaction" && <><Field label="Description"><input required maxLength={160} value={String(form.description)} onInput={set("description")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Type"><select value={String(form.kind)} onChange={set("kind")} className={inputClass}><option value="expense">Expense</option><option value="income">Income</option></select></Field><MoneyField label="Amount" value={String(form.amount)} onInput={set("amount")} /></div><Field label="Date"><input type="date" required value={String(form.date)} onInput={set("date")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} /></>}
           {editor.type === "planned" && <><Field label="Description"><input required maxLength={160} value={String(form.description)} onInput={set("description")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Type"><select value={String(form.kind)} onChange={set("kind")} className={inputClass}><option value="expense">Expense</option><option value="income">Income</option></select></Field><MoneyField label="Amount" value={String(form.amount)} onInput={set("amount")} /></div><Field label="Next due date"><input type="date" required value={String(form.nextDate)} onInput={set("nextDate")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Repeats"><select value={String(form.recurrence)} onChange={set("recurrence")} className={inputClass}><option value="once">Once</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></Field><Field label="Every"><input type="number" min="1" max="99" required value={String(form.intervalCount)} onInput={set("intervalCount")} className={inputClass} /></Field></div><Field label="End date (optional)"><input type="date" value={String(form.endDate)} onInput={set("endDate")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} optional /></>}
+          {editor.type === "correction" && <><MoneyField label="Correct amount" value={String(form.amount)} onInput={set("amount")} /><Field label="Correct date"><input type="date" required value={String(form.date)} onInput={set("date")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} /></>}
           {editor.type === "reserve" && <><Field label="Reserve name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><MoneyField label="Protected amount" value={String(form.amount)} onInput={set("amount")} /><Field label="Note (optional)"><textarea maxLength={300} rows={3} value={String(form.note)} onInput={set("note")} className={inputClass} /></Field></>}
-          {item && editor.type !== "transaction" && <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={Boolean(form.isActive)} onChange={set("isActive")} className="h-4 w-4 accent-green-800" /> Active</label>}
+          {item && (editor.type === "account" || editor.type === "planned" || editor.type === "reserve") && <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={Boolean(form.isActive)} onChange={set("isActive")} className="h-4 w-4 accent-green-800" /> Active</label>}
           {formError && <p className="text-sm text-red-700">{formError}</p>}
           <div className="mt-2 flex justify-end gap-2"><Button secondary type="button" onClick={onClose}>Cancel</Button><Button type="submit" disabled={busy}>{busy ? "Saving…" : "Save"}</Button></div>
         </form>
@@ -296,7 +307,7 @@ function AccountSelect({ accounts, value, onChange, optional }: { accounts: Acco
 
 const inputClass = "w-full box-border rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-base outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100";
 
-function itemToForm(type: NonNullable<Editor>["type"], item: Account | Transaction | PlannedTransaction | Reserve): Record<string, string | boolean> {
+function itemToForm(type: Exclude<NonNullable<Editor>["type"], "correction">, item: Account | Transaction | PlannedTransaction | Reserve): Record<string, string | boolean> {
   if (type === "account") { const a = item as Account; return { name: a.name, type: a.type, balance: euros(a.balanceCents), isActive: a.isActive }; }
   if (type === "transaction") { const t = item as Transaction; return { description: t.description, kind: t.kind, amount: euros(Math.abs(t.amountCents)), date: t.date, accountId: t.accountId }; }
   if (type === "planned") { const p = item as PlannedTransaction; return { description: p.description, kind: p.kind, amount: euros(p.amountCents), nextDate: p.nextDate, recurrence: p.recurrence, intervalCount: String(p.intervalCount), endDate: p.endDate ?? "", accountId: p.accountId ?? "", isActive: p.isActive }; }

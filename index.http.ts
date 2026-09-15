@@ -7,6 +7,7 @@ import { Root } from "./frontend/root.tsx";
 import {
   completePlanned,
   cleanupDemoData,
+  correctPlannedCompletion,
   createAccount,
   createPlanned,
   createReserve,
@@ -15,12 +16,14 @@ import {
   deletePlanned,
   deleteReserve,
   deleteTransaction,
+  deactivatePlanned,
   getAppData,
   seedDemoData,
   updateAccount,
   updatePlanned,
   updateReserve,
   updateTransaction,
+  undoPlannedCompletion,
 } from "./server/repository.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import {
@@ -34,6 +37,8 @@ import {
   optionalString,
   signedCentsField,
   stringField,
+  uuidField,
+  ValidationError,
 } from "./server/validation.ts";
 
 const app = new Hono();
@@ -149,6 +154,31 @@ app.post("/api/planned/:id/complete", async (c) => {
   return c.json({ ok: true });
 });
 
+app.post("/api/planned-completions/:id/undo", async (c) => {
+  const body = await readBody(c.req.raw);
+  await undoPlannedCompletion(
+    safeId(c.req.param("id")),
+    safeId(stringField(body, "expectedEffectiveTransactionId", 64)),
+  );
+  return c.json({ ok: true });
+});
+
+app.post("/api/planned-completions/:id/correct", async (c) => {
+  const body = await readBody(c.req.raw);
+  await correctPlannedCompletion(safeId(c.req.param("id")), {
+    accountId: safeId(stringField(body, "accountId", 64)),
+    date: dateField(body, "date"),
+    amountCents: centsField(body),
+    expectedEffectiveTransactionId: safeId(stringField(body, "expectedEffectiveTransactionId", 64)),
+  });
+  return c.json({ ok: true });
+});
+
+app.post("/api/planned/:id/deactivate", async (c) => {
+  await deactivatePlanned(safeId(c.req.param("id")));
+  return c.json({ ok: true });
+});
+
 app.delete("/api/planned/:id", async (c) => {
   await deletePlanned(safeId(c.req.param("id")));
   return c.body(null, 204);
@@ -213,8 +243,7 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
 }
 
 function safeId(value: string): string {
-  if (!/^[0-9a-f-]{36}$/i.test(value)) throw new Error("Invalid id");
-  return value;
+  return uuidField(value);
 }
 
 function plannedInput(body: Record<string, unknown>) {
@@ -222,8 +251,12 @@ function plannedInput(body: Record<string, unknown>) {
   const nextDate = dateField(body, "nextDate");
   const endDate = optionalString(body, "endDate", 10);
   if (endDate) {
-    assertDateOnly(endDate);
-    if (endDate < nextDate) throw new Error("endDate cannot be before nextDate");
+    try {
+      assertDateOnly(endDate);
+    } catch (error) {
+      throw new ValidationError(error instanceof Error ? error.message : "endDate is invalid");
+    }
+    if (endDate < nextDate) throw new ValidationError("endDate cannot be before nextDate");
   }
   return {
     accountId: accountId ? safeId(accountId) : null,
