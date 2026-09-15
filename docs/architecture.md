@@ -20,3 +20,8 @@ to SQLite as query parameters. Financial rows and secrets are not logged.
 Future import and sync adapters normalize into the canonical `Transaction`
 shape. `external_id`, deterministic `import_identity`, raw metadata, import
 history and transfer grouping already have schema support.
+
+Synthetic demo records carry durable row-level provenance. Seed and cleanup
+operations use SQLite batch claims so serialized concurrent requests remain
+idempotent. Cleanup proceeds only when every stored entity row is demo-marked;
+legacy, real, or mixed datasets are never bulk-deleted.

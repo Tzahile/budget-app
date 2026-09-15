@@ -3,6 +3,12 @@ export type TransactionKind = "income" | "expense" | "refund" | "transfer";
 export type TransactionStatus = "cleared" | "pending";
 export type Recurrence = "once" | "weekly" | "monthly" | "yearly";
 export type PlannedKind = "income" | "expense";
+export type DemoDataState = "empty" | "demo-only" | "real-or-mixed";
+export const DEMO_CLEANUP_CONFIRMATION = "DELETE DEMO DATA";
+
+export function canCleanupDemoData(state: DemoDataState): boolean {
+  return state === "demo-only";
+}
 
 export interface Account {
   id: string;
@@ -86,4 +92,5 @@ export interface AppData {
   transactions: Transaction[];
   plannedTransactions: PlannedTransaction[];
   reserves: Reserve[];
+  demoDataState: DemoDataState;
 }

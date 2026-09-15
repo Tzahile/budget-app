@@ -1,7 +1,7 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
 import { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@18.2.0";
 import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/react@18.2.0";
-import type { Account, AppData, PlannedTransaction, Reserve, Transaction } from "../../shared/types.ts";
+import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
 import { householdDate } from "../../shared/finance.ts";
 
 type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
@@ -59,6 +59,16 @@ export function App() {
     }
   }, []);
 
+  const cleanupDemo = useCallback(() => {
+    const confirmation = window.prompt(`Type ${DEMO_CLEANUP_CONFIRMATION} exactly to permanently remove all synthetic demo data.`);
+    if (confirmation == null) return;
+    if (confirmation !== DEMO_CLEANUP_CONFIRMATION) {
+      setError(`Confirmation did not match ${DEMO_CLEANUP_CONFIRMATION}. Nothing was removed.`);
+      return;
+    }
+    void mutate("/api/demo", "DELETE", { confirmation }).catch(() => undefined);
+  }, [mutate]);
+
   if (!session) return <Centered><Spinner label="Opening your budget…" /></Centered>;
   if (!session.authenticated) {
     return (
@@ -99,9 +109,20 @@ export function App() {
       <main className="mx-auto max-w-6xl px-4 py-6 pb-20 sm:px-6 sm:py-10">
         {error && <div role="alert" className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss">×</button></div>}
         {data.accounts.length === 0 ? (
-          <EmptyStart busy={busy} onDemo={() => mutate("/api/demo", "POST")} onAccount={() => setEditor({ type: "account" })} />
+          <EmptyStart
+            busy={busy}
+            canCleanupDemo={canCleanupDemoData(data.demoDataState)}
+            onDemo={() => mutate("/api/demo", "POST")}
+            onAccount={() => setEditor({ type: "account" })}
+            onCleanupDemo={cleanupDemo}
+          />
         ) : view === "overview" ? (
-          <Overview data={data} onAddTransaction={() => setEditor({ type: "transaction" })} onAddPlanned={() => setEditor({ type: "planned" })} />
+          <Overview
+            data={data}
+            onAddTransaction={() => setEditor({ type: "transaction" })}
+            onAddPlanned={() => setEditor({ type: "planned" })}
+            onCleanupDemo={cleanupDemo}
+          />
         ) : view === "activity" ? (
           <Activity data={data} onAdd={() => setEditor({ type: "transaction" })} onEdit={(item) => setEditor({ type: "transaction", item })} onDelete={(id) => confirmed("Delete this transaction and reverse its balance effect?") && mutate(`/api/transactions/${id}`, "DELETE")} />
         ) : view === "planned" ? (
@@ -125,10 +146,16 @@ export function App() {
   );
 }
 
-function Overview({ data, onAddTransaction, onAddPlanned }: { data: AppData; onAddTransaction: () => void; onAddPlanned: () => void }) {
+function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { data: AppData; onAddTransaction: () => void; onAddPlanned: () => void; onCleanupDemo: () => void }) {
   const d = data.dashboard;
   return (
     <div>
+      {data.demoDataState === "demo-only" && (
+        <div className="mb-6 flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 sm:flex-row sm:items-center">
+          <div><p className="font-medium text-amber-950">Synthetic demo data</p><p className="mt-1 text-sm text-amber-800">This dataset contains demo records only. Cleanup permanently removes all of them.</p></div>
+          <Button secondary onClick={onCleanupDemo}>Remove demo data</Button>
+        </div>
+      )}
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div><p className="text-sm font-medium text-stone-500">HOUSEHOLD CASH FLOW</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">Your money this month</h1><p className="mt-2 text-sm text-stone-500">As of {prettyDate(d.asOfDate)}</p></div>
         <div className="flex gap-2"><Button secondary onClick={onAddPlanned}>Plan ahead</Button><Button onClick={onAddTransaction}>Add transaction</Button></div>
@@ -235,8 +262,8 @@ function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNulla
   );
 }
 
-function EmptyStart({ busy, onDemo, onAccount }: { busy: boolean; onDemo: () => void; onAccount: () => void }) {
-  return <div className="mx-auto max-w-xl rounded-3xl border border-stone-200 bg-white p-7 text-center sm:p-12"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-lime-200 text-2xl text-green-950">€</div><h1 className="mt-6 text-2xl font-semibold">Start with your current cash</h1><p className="mx-auto mt-3 max-w-md text-stone-500">Add a real account balance, or load clearly synthetic data to explore the workflow first.</p><div className="mt-7 flex flex-col justify-center gap-2 sm:flex-row"><Button onClick={onAccount}>Add account</Button><Button secondary onClick={onDemo} disabled={busy}>{busy ? "Loading…" : "Load synthetic demo"}</Button></div></div>;
+function EmptyStart({ busy, canCleanupDemo, onDemo, onAccount, onCleanupDemo }: { busy: boolean; canCleanupDemo: boolean; onDemo: () => void; onAccount: () => void; onCleanupDemo: () => void }) {
+  return <div className="mx-auto max-w-xl rounded-3xl border border-stone-200 bg-white p-7 text-center sm:p-12"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-lime-200 text-2xl text-green-950">€</div><h1 className="mt-6 text-2xl font-semibold">Start with your current cash</h1><p className="mx-auto mt-3 max-w-md text-stone-500">{canCleanupDemo ? "Synthetic demo records remain without an account. Remove them before starting with real data." : "Add a real account balance, or load clearly synthetic data to explore the workflow first."}</p><div className="mt-7 flex flex-col justify-center gap-2 sm:flex-row"><Button onClick={onAccount}>Add account</Button>{canCleanupDemo ? <Button secondary onClick={onCleanupDemo} disabled={busy}>Remove demo data</Button> : <Button secondary onClick={onDemo} disabled={busy}>{busy ? "Loading…" : "Load synthetic demo"}</Button>}</div></div>;
 }
 
 function Page({ title, subtitle, action, onAction, children }: { title: string; subtitle: string; action: string; onAction: () => void; children: ReactNode }) {
