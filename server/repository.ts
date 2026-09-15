@@ -4,6 +4,7 @@ import {
   type Account,
   type AppData,
   type DemoDataState,
+  type PlannedCompletion,
   type PlannedTransaction,
   type Reserve,
   type Transaction,
@@ -15,30 +16,42 @@ import {
   demoSeedStatements,
   demoStateQuery,
 } from "./demo-data.ts";
+import {
+  completePlannedStatements,
+  correctPlannedStatements,
+  PLANNED_COMPLETIONS_QUERY,
+  undoPlannedStatements,
+} from "./planned-operations.ts";
 
 type Row = Record<string, unknown>;
 
 export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   await ensureSchema();
-  const [accountResult, transactionResult, plannedResult, reserveResult, demoResult] = await Promise.all([
+  const monthStart = `${asOfDate.slice(0, 7)}-01`;
+  const [accountResult, transactionResult, dashboardTransactionResult, plannedResult, completionResult, reserveResult, demoResult] = await Promise.all([
     db.execute("SELECT * FROM accounts ORDER BY is_active DESC, name COLLATE NOCASE"),
-    db.execute("SELECT * FROM transactions ORDER BY date DESC, created_at DESC LIMIT 500"),
+    db.execute("SELECT * FROM transactions WHERE voided_at IS NULL ORDER BY date DESC, created_at DESC LIMIT 500"),
+    db.execute({ sql: "SELECT * FROM transactions WHERE voided_at IS NULL AND date BETWEEN ? AND ?", args: [monthStart, asOfDate] }),
     db.execute("SELECT * FROM planned_transactions ORDER BY is_active DESC, next_date, description COLLATE NOCASE"),
+    db.execute(PLANNED_COMPLETIONS_QUERY),
     db.execute("SELECT * FROM reserves ORDER BY is_active DESC, name COLLATE NOCASE"),
     db.execute(demoStateQuery()),
   ]);
   const accounts = accountResult.rows.map(mapAccount);
   const transactions = transactionResult.rows.map(mapTransaction);
+  const dashboardTransactions = dashboardTransactionResult.rows.map(mapTransaction);
   const plannedTransactions = plannedResult.rows.map(mapPlanned);
+  const plannedCompletions = completionResult.rows.map(mapCompletion);
   const reserves = reserveResult.rows.map(mapReserve);
   const demoDataState = demoStateFromRow(demoResult.rows[0] as Row | undefined);
   return {
     accounts,
     transactions,
     plannedTransactions,
+    plannedCompletions,
     reserves,
     demoDataState,
-    dashboard: calculateDashboard({ asOfDate, accounts, transactions, plannedTransactions, reserves }),
+    dashboard: calculateDashboard({ asOfDate, accounts, transactions: dashboardTransactions, plannedTransactions, reserves }),
   };
 }
 
@@ -155,7 +168,8 @@ export async function updatePlanned(id: string, input: Omit<PlannedTransaction, 
   await ensureSchema();
   const result = await db.execute({
     sql: `UPDATE planned_transactions SET account_id = ?, description = ?, kind = ?, amount_cents = ?, recurrence = ?,
-      interval_count = ?, next_date = ?, end_date = ?, is_active = ?, updated_at = ?, is_demo = 0 WHERE id = ?`,
+      interval_count = ?, next_date = ?, end_date = ?, is_active = ?, revision = revision + 1,
+      latest_completion_id = NULL, updated_at = ?, is_demo = 0 WHERE id = ?`,
     args: [input.accountId, input.description, input.kind, input.amountCents, input.recurrence, input.intervalCount,
       input.nextDate, input.endDate, Number(input.isActive), new Date().toISOString(), id],
   });
@@ -170,28 +184,69 @@ export async function completePlanned(id: string, actualDate: string, accountId?
   if (!item.isActive) throw conflict("Planned transaction is inactive");
   const targetAccountId = accountId || item.accountId;
   if (!targetAccountId) throw conflict("Choose an account before marking this item paid");
-  const signedAmount = item.kind === "expense" ? -item.amountCents : item.amountCents;
   const nextDate = addRecurrence(item.nextDate, item.recurrence, item.intervalCount);
   const remainsActive = Boolean(nextDate && (!item.endDate || nextDate <= item.endDate));
   const now = new Date().toISOString();
-  await db.batch([
-    {
-      sql: `INSERT INTO transactions
-        (id, account_id, date, amount_cents, currency, description, kind, status, source, planned_transaction_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'EUR', ?, ?, 'cleared', 'planned', ?, ?, ?)`,
-      args: [crypto.randomUUID(), targetAccountId, actualDate, signedAmount, item.description, item.kind, id, now, now],
-    },
-    { sql: "UPDATE accounts SET balance_cents = balance_cents + ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [signedAmount, now, targetAccountId] },
-    {
-      sql: "UPDATE planned_transactions SET next_date = ?, is_active = ?, updated_at = ?, is_demo = 0 WHERE id = ?",
-      args: [nextDate ?? item.nextDate, Number(remainsActive), now, id],
-    },
-  ]);
+  const completionId = crypto.randomUUID();
+  await db.batch(completePlannedStatements({
+    item: { ...item, revision: Number(row.revision ?? 0) }, completionId, transactionId: crypto.randomUUID(),
+    targetAccountId, actualDate, nextDate: nextDate ?? item.nextDate, remainsActive, now,
+  }));
+  const created = await one("SELECT id FROM planned_completions WHERE id = ?", [completionId]);
+  if (!created) throw conflict("This occurrence was already completed; refresh and try again");
+}
+
+export async function undoPlannedCompletion(completionId: string, expectedEffectiveTransactionId: string): Promise<void> {
+  await ensureSchema();
+  const token = crypto.randomUUID();
+  await db.batch(undoPlannedStatements({ completionId, expectedEffectiveTransactionId, token, now: new Date().toISOString() }));
+  await requireAdjustment(completionId, "undone", token);
+}
+
+export async function correctPlannedCompletion(completionId: string, input: {
+  accountId: string;
+  date: string;
+  amountCents: number;
+  expectedEffectiveTransactionId: string;
+}): Promise<void> {
+  await ensureSchema();
+  const token = crypto.randomUUID();
+  await db.batch(correctPlannedStatements({
+    completionId, expectedEffectiveTransactionId: input.expectedEffectiveTransactionId,
+    correctionTransactionId: crypto.randomUUID(), token,
+    accountId: input.accountId, date: input.date, amountCents: input.amountCents, now: new Date().toISOString(),
+  }));
+  await requireAdjustment(completionId, "corrected", token);
+}
+
+async function requireAdjustment(id: string, expected: "undone" | "corrected", token: string): Promise<void> {
+  const row = await one("SELECT status, last_operation_token FROM planned_completions WHERE id = ?", [id]);
+  if (!row) throw notFound("Planned completion");
+  if (row.status !== expected || row.last_operation_token !== token) {
+    throw conflict("Only the latest unchanged completion can be adjusted");
+  }
 }
 
 export async function deletePlanned(id: string): Promise<void> {
   await ensureSchema();
-  const result = await db.execute({ sql: "DELETE FROM planned_transactions WHERE id = ?", args: [id] });
+  const result = await db.execute({
+    sql: `DELETE FROM planned_transactions WHERE id = ?
+      AND NOT EXISTS (SELECT 1 FROM planned_completions WHERE planned_transaction_id = ?)`,
+    args: [id, id],
+  });
+  if (result.rowsAffected) return;
+  const existing = await one("SELECT id FROM planned_transactions WHERE id = ?", [id]);
+  if (!existing) throw notFound("Planned transaction");
+  throw conflict("Completed planned items must be deactivated to preserve their audit history");
+}
+
+export async function deactivatePlanned(id: string): Promise<void> {
+  await ensureSchema();
+  const result = await db.execute({
+    sql: `UPDATE planned_transactions SET is_active = 0, revision = revision + 1,
+      latest_completion_id = NULL, updated_at = ?, is_demo = 0 WHERE id = ?`,
+    args: [new Date().toISOString(), id],
+  });
   requireChanged(result.rowsAffected, "Planned transaction");
 }
 
@@ -290,7 +345,39 @@ function mapTransaction(row: Row): Transaction {
     status: row.status as Transaction["status"], source: row.source as Transaction["source"],
     transferGroupId: row.transfer_group_id == null ? null : String(row.transfer_group_id),
     plannedTransactionId: row.planned_transaction_id == null ? null : String(row.planned_transaction_id),
+    correctedFromTransactionId: row.corrected_from_transaction_id == null ? null : String(row.corrected_from_transaction_id),
+    voidedAt: row.voided_at == null ? null : String(row.voided_at),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapCompletion(row: Row): PlannedCompletion {
+  const originalTransaction = mapTransaction({
+    id: row.original_id, account_id: row.original_account_id, date: row.original_date,
+    amount_cents: row.original_amount_cents, currency: row.original_currency,
+    description: row.original_description, kind: row.original_kind, status: row.original_status,
+    source: row.original_source, transfer_group_id: row.original_transfer_group_id,
+    planned_transaction_id: row.original_planned_transaction_id,
+    corrected_from_transaction_id: row.original_corrected_from_transaction_id,
+    voided_at: row.original_voided_at, created_at: row.original_created_at, updated_at: row.original_updated_at,
+  });
+  const effectiveTransaction = row.effective_id == null ? null : mapTransaction({
+    id: row.effective_id, account_id: row.effective_account_id, date: row.effective_date,
+    amount_cents: row.effective_amount_cents, currency: row.effective_currency,
+    description: row.effective_description, kind: row.effective_kind, status: row.effective_status,
+    source: row.effective_source, transfer_group_id: row.effective_transfer_group_id,
+    planned_transaction_id: row.effective_planned_transaction_id,
+    corrected_from_transaction_id: row.effective_corrected_from_transaction_id,
+    voided_at: row.effective_voided_at, created_at: row.effective_created_at, updated_at: row.effective_updated_at,
+  });
+  return {
+    id: String(row.id), plannedTransactionId: String(row.planned_transaction_id),
+    originalTransactionId: String(row.transaction_id),
+    correctionTransactionId: row.correction_transaction_id == null ? null : String(row.correction_transaction_id),
+    occurrenceDate: String(row.occurrence_date), completedAt: String(row.created_at),
+    adjustedAt: row.adjusted_at == null ? null : String(row.adjusted_at),
+    status: row.status as PlannedCompletion["status"], adjustable: Boolean(row.adjustable),
+    originalTransaction, effectiveTransaction,
   };
 }
 

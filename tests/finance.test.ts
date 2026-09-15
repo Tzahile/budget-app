@@ -10,7 +10,8 @@ const account = (balanceCents: number, overrides: Partial<Account> = {}): Accoun
 const transaction = (amountCents: number, overrides: Partial<Transaction> = {}): Transaction => ({
   id: crypto.randomUUID(), accountId: "account-1", date: "2026-09-10", amountCents, currency: "EUR",
   description: "Test", kind: amountCents < 0 ? "expense" : "income", status: "cleared", source: "manual",
-  transferGroupId: null, plannedTransactionId: null, createdAt: now, updatedAt: now, ...overrides,
+  transferGroupId: null, plannedTransactionId: null, correctedFromTransactionId: null, voidedAt: null,
+  createdAt: now, updatedAt: now, ...overrides,
 });
 const planned = (overrides: Partial<PlannedTransaction> = {}): PlannedTransaction => ({
   id: "planned-1", accountId: "account-1", description: "Mortgage", kind: "expense", amountCents: 58_100,
