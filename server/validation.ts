@@ -13,6 +13,13 @@ export function stringField(body: Record<string, unknown>, key: string, max = 12
   return normalized;
 }
 
+export function exactStringField(body: Record<string, unknown>, key: string, max = 120): string {
+  const value = body[key];
+  if (typeof value !== "string" || !value) throw new Error(`${key} is required`);
+  if (value.length > max) throw new Error(`${key} is too long`);
+  return value;
+}
+
 export function optionalString(body: Record<string, unknown>, key: string, max = 500): string | null {
   const value = body[key];
   if (value == null || value === "") return null;

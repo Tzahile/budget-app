@@ -1,11 +1,15 @@
 import { sqlite } from "https://esm.town/v/std/sqlite/main.ts";
+import { demoEntityTables, demoProvenanceMigrationSql, isDuplicateIsDemoColumnError } from "./demo-data.ts";
 
 export const db = sqlite;
 
 let initialized: Promise<void> | null = null;
 
 export function ensureSchema(): Promise<void> {
-  initialized ??= migrate();
+  initialized ??= migrate().catch((error) => {
+    initialized = null;
+    throw error;
+  });
   return initialized;
 }
 
@@ -82,9 +86,36 @@ async function migrate(): Promise<void> {
       created_at TEXT NOT NULL,
       completed_at TEXT
     )`,
+    `CREATE TABLE IF NOT EXISTS app_metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
     {
       sql: `INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
       args: [1, new Date().toISOString()],
     },
   ]);
+
+  await applyDemoProvenanceMigration();
+}
+
+async function applyDemoProvenanceMigration(): Promise<void> {
+  const applied = await db.execute("SELECT 1 FROM schema_migrations WHERE version = 2");
+  if (applied.rows.length) return;
+
+  for (const table of demoEntityTables) {
+    try {
+      await db.execute(demoProvenanceMigrationSql(table));
+    } catch (error) {
+      // Concurrent cold starts can both observe an unapplied migration. Only the
+      // exact, recoverable duplicate-column outcome is safe to accept.
+      if (!isDuplicateIsDemoColumnError(error)) throw error;
+    }
+  }
+
+  await db.execute({
+    sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?)",
+    args: [new Date().toISOString()],
+  });
 }

@@ -17,6 +17,7 @@ committed this month, what is protected, and what remains safe to spend.
 - projected month-end and safe-to-spend dashboard
 - responsive mobile/desktop React UI
 - explicit synthetic demo dataset
+- guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
 
 All persisted money uses integer EUR cents. See

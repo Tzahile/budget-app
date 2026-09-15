@@ -9,7 +9,7 @@
     "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals", "node"]
   },
   "include": ["index.http.ts", "server/**/*.ts", "shared/**/*.ts", "tests/**/*.ts", "frontend/**/*.tsx", "types/**/*.d.ts"]
 }

@@ -6,6 +6,7 @@ import { assertDateOnly, householdDate } from "./shared/finance.ts";
 import { Root } from "./frontend/root.tsx";
 import {
   completePlanned,
+  cleanupDemoData,
   createAccount,
   createPlanned,
   createReserve,
@@ -21,11 +22,13 @@ import {
   updateReserve,
   updateTransaction,
 } from "./server/repository.ts";
+import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import {
   booleanField,
   centsField,
   dateField,
   enumField,
+  exactStringField,
   integerField,
   objectBody,
   optionalString,
@@ -178,6 +181,12 @@ app.delete("/api/reserves/:id", async (c) => {
 });
 
 app.post("/api/demo", async (c) => c.json({ seeded: await seedDemoData() }));
+
+app.delete("/api/demo", async (c) => {
+  const body = await readBody(c.req.raw);
+  const confirmation = exactStringField(body, "confirmation", DEMO_CLEANUP_CONFIRMATION.length);
+  return c.json({ cleaned: await cleanupDemoData(confirmation) });
+});
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
