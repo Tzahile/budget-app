@@ -24,7 +24,7 @@ import {
   undoPlannedStatements,
 } from "./planned-operations.ts";
 import { reconcileAccountStatements } from "./reconciliation-operations.ts";
-import { updateReserveStatement } from "./reserve-operations.ts";
+import { createReserveStatement, updateReserveStatement } from "./reserve-operations.ts";
 
 type Row = Record<string, unknown>;
 
@@ -193,14 +193,22 @@ export async function createPlanned(input: Omit<PlannedTransaction, "id" | "curr
 
 export async function updatePlanned(id: string, input: Omit<PlannedTransaction, "id" | "currency" | "createdAt" | "updatedAt">): Promise<void> {
   await ensureSchema();
-  const result = await db.execute({
-    sql: `UPDATE planned_transactions SET account_id = ?, description = ?, kind = ?, amount_cents = ?, recurrence = ?,
-      interval_count = ?, next_date = ?, end_date = ?, is_active = ?, revision = revision + 1,
-      latest_completion_id = NULL, updated_at = ?, is_demo = 0 WHERE id = ?`,
-    args: [input.accountId, input.description, input.kind, input.amountCents, input.recurrence, input.intervalCount,
-      input.nextDate, input.endDate, Number(input.isActive), new Date().toISOString(), id],
-  });
-  requireChanged(result.rowsAffected, "Planned transaction");
+  const now = new Date().toISOString();
+  await db.batch([
+    {
+      sql: `UPDATE planned_transactions SET account_id = ?, description = ?, kind = ?, amount_cents = ?, recurrence = ?,
+        interval_count = ?, next_date = ?, end_date = ?, is_active = ?, revision = revision + 1,
+        latest_completion_id = NULL, updated_at = ?, is_demo = 0 WHERE id = ?`,
+      args: [input.accountId, input.description, input.kind, input.amountCents, input.recurrence, input.intervalCount,
+        input.nextDate, input.endDate, Number(input.isActive), now, id],
+    },
+    {
+      sql: `UPDATE reserves SET linked_planned_transaction_id = NULL, updated_at = ?
+        WHERE linked_planned_transaction_id = ? AND (? <> 'expense' OR ? <> 'once')`,
+      args: [now, id, input.kind, input.recurrence],
+    },
+  ]);
+  if (!await one("SELECT id FROM planned_transactions WHERE id = ?", [id])) throw notFound("Planned transaction");
 }
 
 export async function completePlanned(id: string, actualDate: string, accountId?: string | null): Promise<void> {
@@ -282,18 +290,18 @@ export async function createReserve(input: {
   fundedAmountCents: number;
   targetAmountCents: number | null;
   targetDate: string | null;
+  linkedPlannedTransactionId: string | null;
   note: string;
 }): Promise<void> {
   await ensureSchema();
   const now = new Date().toISOString();
-  await db.execute({
-    sql: `INSERT INTO reserves
-      (id, name, amount_cents, target_amount_cents, target_date, contribution_month,
-        contribution_cents, currency, note, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 0, 'EUR', ?, 1, ?, ?)`,
-    args: [crypto.randomUUID(), input.name, input.fundedAmountCents, input.targetAmountCents,
-      input.targetDate, input.targetAmountCents == null ? null : householdDate().slice(0, 7), input.note, now, now],
-  });
+  const result = await executeReserveWrite(createReserveStatement({
+    id: crypto.randomUUID(),
+    ...input,
+    contributionMonth: householdDate().slice(0, 7),
+    now,
+  }), input.linkedPlannedTransactionId);
+  if (!result.rowsAffected) throw invalidReserveLink();
 }
 
 export async function updateReserve(id: string, input: {
@@ -301,17 +309,20 @@ export async function updateReserve(id: string, input: {
   fundedAmountCents: number;
   targetAmountCents: number | null;
   targetDate: string | null;
+  linkedPlannedTransactionId: string | null;
   note: string;
   isActive: boolean;
 }): Promise<void> {
   await ensureSchema();
-  const result = await db.execute(updateReserveStatement({
+  const result = await executeReserveWrite(updateReserveStatement({
     id,
     ...input,
     contributionMonth: householdDate().slice(0, 7),
     now: new Date().toISOString(),
-  }));
-  requireChanged(result.rowsAffected, "Reserve");
+  }), input.linkedPlannedTransactionId);
+  if (result.rowsAffected) return;
+  if (!await one("SELECT id FROM reserves WHERE id = ?", [id])) throw notFound("Reserve");
+  throw invalidReserveLink();
 }
 
 export async function deleteReserve(id: string): Promise<void> {
@@ -453,11 +464,27 @@ function mapReserve(row: Row, asOfDate: string): Reserve {
     targetDate: row.target_date == null ? null : String(row.target_date),
     contributionMonth: row.contribution_month == null ? null : String(row.contribution_month),
     contributedThisMonthCents: Number(row.contribution_cents), requiredContributionCents: 0,
+    linkedPlannedTransactionId: row.linked_planned_transaction_id == null
+      ? null
+      : String(row.linked_planned_transaction_id),
     currency: String(row.currency), note: String(row.note), isActive: Boolean(row.is_active),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
   reserve.requiredContributionCents = requiredGoalContributionCents(reserve, asOfDate);
   return reserve;
+}
+
+async function executeReserveWrite(statement: { sql: string; args: (string | number | null)[] }, linkedId: string | null) {
+  try {
+    return await db.execute(statement);
+  } catch (error) {
+    if (linkedId && error instanceof Error && /constraint|unique/i.test(error.message)) throw invalidReserveLink();
+    throw error;
+  }
+}
+
+function invalidReserveLink(): Error {
+  return conflict("Choose an active, one-off planned expense that is not linked to another goal");
 }
 
 function requireChanged(rowsAffected: number, entity: string): void {

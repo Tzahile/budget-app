@@ -21,7 +21,8 @@ const planned = (overrides: Partial<PlannedTransaction> = {}): PlannedTransactio
 const reserve = (amountCents: number, overrides: Partial<Reserve> = {}): Reserve => ({
   id: crypto.randomUUID(), name: "Buffer", fundedAmountCents: amountCents, targetAmountCents: null,
   targetDate: null, contributionMonth: null, contributedThisMonthCents: 0,
-  requiredContributionCents: 0, currency: "EUR", note: "", isActive: true,
+  requiredContributionCents: 0, linkedPlannedTransactionId: null,
+  currency: "EUR", note: "", isActive: true,
   createdAt: now, updatedAt: now, ...overrides,
 });
 
@@ -93,6 +94,91 @@ describe("calculateDashboard", () => {
     });
     expect(result.remainingExpensesCents).toBe(25_000);
     expect(result.upcoming[0]?.date).toBe("2026-09-05");
+  });
+
+  it("counts a fully funded linked goal and its planned expense only once", () => {
+    const expense = planned({ recurrence: "once", amountCents: 600_000, nextDate: "2026-09-20" });
+    const result = calculateDashboard({
+      asOfDate: "2026-09-12",
+      accounts: [account(1_000_000)],
+      transactions: [],
+      plannedTransactions: [expense],
+      reserves: [reserve(600_000, {
+        name: "New car",
+        targetAmountCents: 600_000,
+        targetDate: "2026-09-20",
+        linkedPlannedTransactionId: expense.id,
+      })],
+    });
+
+    expect(result.remainingExpensesCents).toBe(600_000);
+    expect(result.projectedMonthEndCents).toBe(400_000);
+    expect(result.linkedGoalCoverageCents).toBe(600_000);
+    expect(result.protectedReservesCents).toBe(0);
+    expect(result.safeToSpendCents).toBe(400_000);
+    expect(result.upcoming[0]).toMatchObject({
+      linkedReserveName: "New car",
+      linkedGoalCoverageCents: 600_000,
+    });
+  });
+
+  it("only overlaps the protected portion of a partly funded linked goal", () => {
+    const expense = planned({ recurrence: "once", amountCents: 600_000, nextDate: "2026-09-20" });
+    const result = calculateDashboard({
+      asOfDate: "2026-09-12",
+      accounts: [account(1_000_000)],
+      transactions: [],
+      plannedTransactions: [expense],
+      reserves: [reserve(200_000, {
+        targetAmountCents: 300_000,
+        targetDate: "2026-09-20",
+        linkedPlannedTransactionId: expense.id,
+      })],
+    });
+
+    expect(result.requiredGoalContributionsCents).toBe(100_000);
+    expect(result.linkedGoalCoverageCents).toBe(300_000);
+    expect(result.protectedReservesCents).toBe(0);
+    expect(result.safeToSpendCents).toBe(400_000);
+  });
+
+  it("leaves unlinked, inactive, missing, and recurring associations unchanged", () => {
+    const expense = planned({ recurrence: "once", amountCents: 60_000, nextDate: "2026-09-20" });
+    const scenarios = [
+      reserve(20_000, { targetAmountCents: 20_000, targetDate: "2026-09-20" }),
+      reserve(20_000, { targetAmountCents: 20_000, targetDate: "2026-09-20", linkedPlannedTransactionId: expense.id, isActive: false }),
+      reserve(20_000, { targetAmountCents: 20_000, targetDate: "2026-09-20", linkedPlannedTransactionId: "deleted-plan" }),
+      reserve(20_000, { targetAmountCents: 20_000, targetDate: "2026-09-20", linkedPlannedTransactionId: expense.id }),
+      reserve(20_000, { targetAmountCents: 20_000, targetDate: "2026-09-20", linkedPlannedTransactionId: expense.id }),
+    ];
+    const plannedInputs = [
+      [expense], [expense], [expense],
+      [planned({ ...expense, recurrence: "monthly" })],
+      [planned({ ...expense, isActive: false })],
+    ];
+
+    scenarios.forEach((goal, index) => {
+      const result = calculateDashboard({
+        asOfDate: "2026-09-12", accounts: [account(100_000)], transactions: [],
+        plannedTransactions: plannedInputs[index], reserves: [goal],
+      });
+      expect(result.linkedGoalCoverageCents).toBe(0);
+    });
+  });
+
+  it("applies linked coverage to an overdue unpaid one-off expense", () => {
+    const expense = planned({ recurrence: "once", amountCents: 60_000, nextDate: "2026-09-05" });
+    const result = calculateDashboard({
+      asOfDate: "2026-09-12", accounts: [account(100_000)], transactions: [], plannedTransactions: [expense],
+      reserves: [reserve(25_000, {
+        targetAmountCents: 25_000,
+        targetDate: "2026-09-05",
+        linkedPlannedTransactionId: expense.id,
+      })],
+    });
+
+    expect(result.linkedGoalCoverageCents).toBe(25_000);
+    expect(result.safeToSpendCents).toBe(40_000);
   });
 });
 

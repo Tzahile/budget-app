@@ -79,6 +79,9 @@ export function occurrencesBetween(
         kind: item.kind,
         amountCents: item.amountCents,
         date: cursor,
+        linkedReserveId: null,
+        linkedReserveName: null,
+        linkedGoalCoverageCents: 0,
       });
     }
     cursor = addRecurrence(cursor, item.recurrence, item.intervalCount);
@@ -102,20 +105,40 @@ export function calculateDashboard(input: {
   const grossExpenses = sum(monthTransactions.filter((t) => t.kind === "expense"), (t) => Math.abs(t.amountCents));
   const refunds = sum(monthTransactions.filter((t) => t.kind === "refund"), (t) => Math.abs(t.amountCents));
   const spentThisMonthCents = Math.max(0, grossExpenses - refunds);
-  const upcoming = input.plannedTransactions
+  const rawUpcoming = input.plannedTransactions
     // nextDate is the earliest unpaid occurrence, so overdue items remain
     // committed until explicitly completed rather than disappearing at midnight.
     .flatMap((item) => occurrencesBetween(item, item.nextDate, end))
     .sort((a, b) => a.date.localeCompare(b.date) || a.description.localeCompare(b.description));
+  const activeReserves = input.reserves.filter((reserve) => reserve.isActive);
+  const linkedReserves = new Map(activeReserves
+    .filter((reserve) => reserve.targetAmountCents != null && reserve.linkedPlannedTransactionId != null)
+    .map((reserve) => [reserve.linkedPlannedTransactionId!, reserve]));
+  const eligiblePlannedIds = new Set(input.plannedTransactions
+    .filter((item) => item.isActive && item.kind === "expense" && item.recurrence === "once")
+    .map((item) => item.id));
+  const upcoming = rawUpcoming.map((occurrence) => {
+    const reserve = occurrence.kind === "expense" && eligiblePlannedIds.has(occurrence.plannedTransactionId)
+      ? linkedReserves.get(occurrence.plannedTransactionId)
+      : undefined;
+    if (!reserve) return occurrence;
+    const protectedForGoal = reserve.fundedAmountCents + requiredGoalContributionCents(reserve, input.asOfDate);
+    return {
+      ...occurrence,
+      linkedReserveId: reserve.id,
+      linkedReserveName: reserve.name,
+      linkedGoalCoverageCents: Math.min(occurrence.amountCents, protectedForGoal),
+    };
+  });
   const remainingIncomeCents = sum(upcoming.filter((o) => o.kind === "income"), (o) => o.amountCents);
   const remainingExpensesCents = sum(upcoming.filter((o) => o.kind === "expense"), (o) => o.amountCents);
-  const activeReserves = input.reserves.filter((reserve) => reserve.isActive);
   const fundedReservesCents = sum(activeReserves, (reserve) => reserve.fundedAmountCents);
   const requiredGoalContributionsCents = sum(
     activeReserves,
     (reserve) => requiredGoalContributionCents(reserve, input.asOfDate),
   );
-  const protectedReservesCents = fundedReservesCents + requiredGoalContributionsCents;
+  const linkedGoalCoverageCents = sum(upcoming, (occurrence) => occurrence.linkedGoalCoverageCents);
+  const protectedReservesCents = fundedReservesCents + requiredGoalContributionsCents - linkedGoalCoverageCents;
   const projectedMonthEndCents = currentCashCents + remainingIncomeCents - remainingExpensesCents;
   const safeToSpendCents = projectedMonthEndCents - protectedReservesCents;
 
@@ -129,6 +152,7 @@ export function calculateDashboard(input: {
     remainingExpensesCents,
     fundedReservesCents,
     requiredGoalContributionsCents,
+    linkedGoalCoverageCents,
     protectedReservesCents,
     projectedMonthEndCents,
     safeToSpendCents,

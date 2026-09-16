@@ -283,6 +283,10 @@ function reserveInput(body: Record<string, unknown>) {
   if (hasTargetAmount !== hasTargetDate) {
     throw new ValidationError("targetAmountCents and targetDate must be provided together");
   }
+  const linkedPlannedTransactionId = optionalString(body, "linkedPlannedTransactionId", 64);
+  if (linkedPlannedTransactionId && !hasTargetAmount) {
+    throw new ValidationError("Only a target-date reserve can link a planned expense");
+  }
   return {
     name: stringField(body, "name", 80),
     // Continue accepting the original field so existing API clients can keep
@@ -292,6 +296,7 @@ function reserveInput(body: Record<string, unknown>) {
       : centsField(body, "fundedAmountCents", true),
     targetAmountCents: hasTargetAmount ? centsField(body, "targetAmountCents") : null,
     targetDate: hasTargetDate ? dateField(body, "targetDate") : null,
+    linkedPlannedTransactionId: linkedPlannedTransactionId ? safeId(linkedPlannedTransactionId) : null,
     note: optionalString(body, "note", 300) ?? "",
   };
 }
