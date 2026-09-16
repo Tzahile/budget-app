@@ -21,6 +21,17 @@ export interface Account {
   updatedAt: string;
 }
 
+export interface AccountReconciliation {
+  id: string;
+  accountId: string;
+  date: string;
+  previousBalanceCents: number;
+  actualBalanceCents: number;
+  differenceCents: number;
+  note: string;
+  createdAt: string;
+}
+
 export interface Transaction {
   id: string;
   accountId: string;
@@ -105,6 +116,7 @@ export interface DashboardSummary {
 export interface AppData {
   dashboard: DashboardSummary;
   accounts: Account[];
+  accountReconciliations: AccountReconciliation[];
   transactions: Transaction[];
   plannedTransactions: PlannedTransaction[];
   plannedCompletions: PlannedCompletion[];

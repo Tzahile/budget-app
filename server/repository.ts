@@ -2,6 +2,7 @@ import { addRecurrence, calculateDashboard, householdDate } from "../shared/fina
 import {
   DEMO_CLEANUP_CONFIRMATION,
   type Account,
+  type AccountReconciliation,
   type AppData,
   type DemoDataState,
   type PlannedCompletion,
@@ -22,14 +23,16 @@ import {
   PLANNED_COMPLETIONS_QUERY,
   undoPlannedStatements,
 } from "./planned-operations.ts";
+import { reconcileAccountStatements } from "./reconciliation-operations.ts";
 
 type Row = Record<string, unknown>;
 
 export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   await ensureSchema();
   const monthStart = `${asOfDate.slice(0, 7)}-01`;
-  const [accountResult, transactionResult, dashboardTransactionResult, plannedResult, completionResult, reserveResult, demoResult] = await Promise.all([
+  const [accountResult, reconciliationResult, transactionResult, dashboardTransactionResult, plannedResult, completionResult, reserveResult, demoResult] = await Promise.all([
     db.execute("SELECT * FROM accounts ORDER BY is_active DESC, name COLLATE NOCASE"),
+    db.execute("SELECT * FROM account_reconciliations ORDER BY date DESC, created_at DESC LIMIT 500"),
     db.execute("SELECT * FROM transactions WHERE voided_at IS NULL ORDER BY date DESC, created_at DESC LIMIT 500"),
     db.execute({ sql: "SELECT * FROM transactions WHERE voided_at IS NULL AND date BETWEEN ? AND ?", args: [monthStart, asOfDate] }),
     db.execute("SELECT * FROM planned_transactions ORDER BY is_active DESC, next_date, description COLLATE NOCASE"),
@@ -38,6 +41,7 @@ export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
     db.execute(demoStateQuery()),
   ]);
   const accounts = accountResult.rows.map(mapAccount);
+  const accountReconciliations = reconciliationResult.rows.map(mapReconciliation);
   const transactions = transactionResult.rows.map(mapTransaction);
   const dashboardTransactions = dashboardTransactionResult.rows.map(mapTransaction);
   const plannedTransactions = plannedResult.rows.map(mapPlanned);
@@ -46,6 +50,7 @@ export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   const demoDataState = demoStateFromRow(demoResult.rows[0] as Row | undefined);
   return {
     accounts,
+    accountReconciliations,
     transactions,
     plannedTransactions,
     plannedCompletions,
@@ -72,15 +77,36 @@ export async function createAccount(input: {
 export async function updateAccount(id: string, input: {
   name: string;
   type: Account["type"];
-  balanceCents: number;
   isActive: boolean;
 }): Promise<void> {
   await ensureSchema();
   const result = await db.execute({
-    sql: `UPDATE accounts SET name = ?, type = ?, balance_cents = ?, is_active = ?, updated_at = ?, is_demo = 0 WHERE id = ?`,
-    args: [input.name, input.type, input.balanceCents, Number(input.isActive), new Date().toISOString(), id],
+    sql: `UPDATE accounts SET name = ?, type = ?, is_active = ?, updated_at = ?, is_demo = 0 WHERE id = ?`,
+    args: [input.name, input.type, Number(input.isActive), new Date().toISOString(), id],
   });
   requireChanged(result.rowsAffected, "Account");
+}
+
+export async function reconcileAccount(id: string, input: {
+  actualBalanceCents: number;
+  date: string;
+  note: string;
+}): Promise<void> {
+  await ensureSchema();
+  const reconciliationId = crypto.randomUUID();
+  await db.batch(reconcileAccountStatements({
+    reconciliationId,
+    accountId: id,
+    actualBalanceCents: input.actualBalanceCents,
+    date: input.date,
+    note: input.note,
+    now: new Date().toISOString(),
+  }));
+  const created = await one("SELECT id FROM account_reconciliations WHERE id = ?", [reconciliationId]);
+  if (created) return;
+  const account = await one("SELECT is_active FROM accounts WHERE id = ?", [id]);
+  if (!account) throw notFound("Account");
+  throw conflict("Only active accounts can be reconciled");
 }
 
 export async function deleteAccount(id: string): Promise<void> {
@@ -335,6 +361,16 @@ function mapAccount(row: Row): Account {
   return {
     id: String(row.id), name: String(row.name), type: row.type as Account["type"], currency: String(row.currency),
     balanceCents: Number(row.balance_cents), isActive: Boolean(row.is_active), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapReconciliation(row: Row): AccountReconciliation {
+  return {
+    id: String(row.id), accountId: String(row.account_id), date: String(row.date),
+    previousBalanceCents: Number(row.previous_balance_cents),
+    actualBalanceCents: Number(row.actual_balance_cents),
+    differenceCents: Number(row.difference_cents), note: String(row.note),
+    createdAt: String(row.created_at),
   };
 }
 

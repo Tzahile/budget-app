@@ -18,6 +18,7 @@ import {
   deleteTransaction,
   deactivatePlanned,
   getAppData,
+  reconcileAccount,
   seedDemoData,
   updateAccount,
   updatePlanned,
@@ -92,10 +93,19 @@ app.put("/api/accounts/:id", async (c) => {
   await updateAccount(safeId(c.req.param("id")), {
     name: stringField(body, "name", 80),
     type: enumField(body, "type", ["checking", "savings", "cash"] as const),
-    balanceCents: signedCentsField(body, "balanceCents"),
     isActive: booleanField(body, "isActive", true),
   });
   return c.json({ ok: true });
+});
+
+app.post("/api/accounts/:id/reconcile", async (c) => {
+  const body = await readBody(c.req.raw);
+  await reconcileAccount(safeId(c.req.param("id")), {
+    actualBalanceCents: signedCentsField(body, "actualBalanceCents"),
+    date: dateField(body, "date"),
+    note: optionalString(body, "note", 300) ?? "",
+  });
+  return c.json({ ok: true }, 201);
 });
 
 app.delete("/api/accounts/:id", async (c) => {

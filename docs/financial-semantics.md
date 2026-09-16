@@ -19,6 +19,14 @@ deleting that transaction applies the exact inverse balance adjustment.
 
 Inactive accounts are excluded from current cash.
 
+Editing an account never changes its balance. To align BudgetApp with a bank,
+the user records a reconciliation with the actual cleared balance, household
+calendar date, and optional note. The reconciliation atomically captures the
+previous balance, actual balance, and exact difference before updating the
+account. A zero-difference reconciliation is retained as an audit checkpoint.
+Reconciliation differences are not transactions: they are excluded from
+income, spending, planned cash flow, and projections.
+
 ## Transactions
 
 - Income is stored as a positive amount.
