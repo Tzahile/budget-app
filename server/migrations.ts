@@ -149,6 +149,14 @@ export const migrations: readonly Migration[] = [
       "CREATE INDEX account_reconciliations_account_date_idx ON account_reconciliations(account_id, date DESC, created_at DESC)",
     ],
   },
+  {
+    version: 5,
+    name: "reserve goals",
+    statements: [
+      "ALTER TABLE reserves ADD COLUMN target_amount_cents INTEGER CHECK (target_amount_cents IS NULL OR target_amount_cents > 0)",
+      "ALTER TABLE reserves ADD COLUMN target_date TEXT CHECK ((target_amount_cents IS NULL) = (target_date IS NULL))",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

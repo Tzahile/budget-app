@@ -79,9 +79,19 @@ last day of the target month.
 Reserves represent money that still exists in account balances but is protected
 from normal spending. They never reduce current cash or projected balance.
 
+A reserve may optionally be a goal with a target amount and target date. Its
+funded amount is already protected. The remaining shortfall is divided across
+the current month through the target month, inclusive, and rounded up to a
+whole cent. A goal due this month or overdue requires its full remaining
+shortfall now. Completed, overfunded, inactive, and non-goal reserves require no
+contribution. The current month's required contribution is also protected from
+safe-to-spend, but it does not change the account balance until the user updates
+the funded amount.
+
 ```text
 projected month-end = current cash + remaining expected income - remaining committed expenses
-safe to spend       = projected month-end - active protected reserves
+protected reserves  = funded active reserves + required goal contributions this month
+safe to spend       = projected month-end - protected reserves
 ```
 
 Safe to spend may be negative; it is not clamped to zero.

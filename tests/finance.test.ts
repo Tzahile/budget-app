@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addRecurrence, assertDateOnly, calculateDashboard, householdDate, occurrencesBetween } from "../shared/finance.ts";
+import { addRecurrence, assertDateOnly, calculateDashboard, householdDate, occurrencesBetween, requiredGoalContributionCents } from "../shared/finance.ts";
 import type { Account, PlannedTransaction, Reserve, Transaction } from "../shared/types.ts";
 
 const now = "2026-09-12T10:00:00.000Z";
@@ -19,7 +19,8 @@ const planned = (overrides: Partial<PlannedTransaction> = {}): PlannedTransactio
   isActive: true, createdAt: now, updatedAt: now, ...overrides,
 });
 const reserve = (amountCents: number, overrides: Partial<Reserve> = {}): Reserve => ({
-  id: crypto.randomUUID(), name: "Buffer", amountCents, currency: "EUR", note: "", isActive: true,
+  id: crypto.randomUUID(), name: "Buffer", fundedAmountCents: amountCents, targetAmountCents: null,
+  targetDate: null, requiredContributionCents: 0, currency: "EUR", note: "", isActive: true,
   createdAt: now, updatedAt: now, ...overrides,
 });
 
@@ -38,6 +39,8 @@ describe("calculateDashboard", () => {
     expect(result.remainingIncomeCents).toBe(280_000);
     expect(result.remainingExpensesCents).toBe(58_100);
     expect(result.projectedMonthEndCents).toBe(471_900);
+    expect(result.fundedReservesCents).toBe(100_000);
+    expect(result.requiredGoalContributionsCents).toBe(0);
     expect(result.safeToSpendCents).toBe(371_900);
   });
 
@@ -89,6 +92,61 @@ describe("calculateDashboard", () => {
     });
     expect(result.remainingExpensesCents).toBe(25_000);
     expect(result.upcoming[0]?.date).toBe("2026-09-05");
+  });
+});
+
+describe("reserve goals", () => {
+  it("supports a 6000 EUR November goal with one contribution per remaining month", () => {
+    const goal = reserve(0, { targetAmountCents: 600_000, targetDate: "2026-11-30" });
+    const result = calculateDashboard({
+      asOfDate: "2026-09-12", accounts: [account(700_000)], transactions: [], plannedTransactions: [],
+      reserves: [goal],
+    });
+
+    expect(requiredGoalContributionCents(goal, "2026-09-12")).toBe(200_000);
+    expect(result.fundedReservesCents).toBe(0);
+    expect(result.requiredGoalContributionsCents).toBe(200_000);
+    expect(result.safeToSpendCents).toBe(500_000);
+  });
+
+  it("uses funded progress and rounds the contribution up to whole cents", () => {
+    const goal = reserve(100_000, { targetAmountCents: 600_000, targetDate: "2026-11-30" });
+    expect(requiredGoalContributionCents(goal, "2026-09-12")).toBe(166_667);
+    const result = calculateDashboard({
+      asOfDate: "2026-09-12", accounts: [account(700_000)], transactions: [], plannedTransactions: [],
+      reserves: [goal],
+    });
+    expect(result.fundedReservesCents).toBe(100_000);
+    expect(result.requiredGoalContributionsCents).toBe(166_667);
+    expect(result.protectedReservesCents).toBe(266_667);
+    expect(result.safeToSpendCents).toBe(433_333);
+    expect(requiredGoalContributionCents(
+      reserve(0, { targetAmountCents: 100, targetDate: "2026-11-30" }),
+      "2026-09-12",
+    )).toBe(34);
+  });
+
+  it("requires the entire remaining shortfall for current-month and overdue goals", () => {
+    const currentMonth = reserve(25_000, { targetAmountCents: 100_000, targetDate: "2026-09-30" });
+    const overdue = reserve(25_000, { targetAmountCents: 100_000, targetDate: "2026-08-31" });
+    expect(requiredGoalContributionCents(currentMonth, "2026-09-12")).toBe(75_000);
+    expect(requiredGoalContributionCents(overdue, "2026-09-12")).toBe(75_000);
+  });
+
+  it("requires nothing for inactive, simple, completed, or overfunded reserves", () => {
+    expect(requiredGoalContributionCents(reserve(10_000), "2026-09-12")).toBe(0);
+    expect(requiredGoalContributionCents(
+      reserve(10_000, { targetAmountCents: 20_000, targetDate: "2026-11-30", isActive: false }),
+      "2026-09-12",
+    )).toBe(0);
+    expect(requiredGoalContributionCents(
+      reserve(20_000, { targetAmountCents: 20_000, targetDate: "2026-11-30" }),
+      "2026-09-12",
+    )).toBe(0);
+    expect(requiredGoalContributionCents(
+      reserve(25_000, { targetAmountCents: 20_000, targetDate: "2026-11-30" }),
+      "2026-09-12",
+    )).toBe(0);
   });
 });
 
