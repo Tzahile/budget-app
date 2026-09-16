@@ -1,4 +1,4 @@
-import { addRecurrence, calculateDashboard, householdDate } from "../shared/finance.ts";
+import { addRecurrence, calculateDashboard, householdDate, requiredGoalContributionCents } from "../shared/finance.ts";
 import {
   DEMO_CLEANUP_CONFIRMATION,
   type Account,
@@ -24,6 +24,7 @@ import {
   undoPlannedStatements,
 } from "./planned-operations.ts";
 import { reconcileAccountStatements } from "./reconciliation-operations.ts";
+import { updateReserveStatement } from "./reserve-operations.ts";
 
 type Row = Record<string, unknown>;
 
@@ -46,7 +47,7 @@ export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   const dashboardTransactions = dashboardTransactionResult.rows.map(mapTransaction);
   const plannedTransactions = plannedResult.rows.map(mapPlanned);
   const plannedCompletions = completionResult.rows.map(mapCompletion);
-  const reserves = reserveResult.rows.map(mapReserve);
+  const reserves = reserveResult.rows.map((row) => mapReserve(row, asOfDate));
   const demoDataState = demoStateFromRow(demoResult.rows[0] as Row | undefined);
   return {
     accounts,
@@ -276,22 +277,40 @@ export async function deactivatePlanned(id: string): Promise<void> {
   requireChanged(result.rowsAffected, "Planned transaction");
 }
 
-export async function createReserve(input: { name: string; amountCents: number; note: string }): Promise<void> {
+export async function createReserve(input: {
+  name: string;
+  fundedAmountCents: number;
+  targetAmountCents: number | null;
+  targetDate: string | null;
+  note: string;
+}): Promise<void> {
   await ensureSchema();
   const now = new Date().toISOString();
   await db.execute({
-    sql: `INSERT INTO reserves (id, name, amount_cents, currency, note, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, 'EUR', ?, 1, ?, ?)`,
-    args: [crypto.randomUUID(), input.name, input.amountCents, input.note, now, now],
+    sql: `INSERT INTO reserves
+      (id, name, amount_cents, target_amount_cents, target_date, contribution_month,
+        contribution_cents, currency, note, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 'EUR', ?, 1, ?, ?)`,
+    args: [crypto.randomUUID(), input.name, input.fundedAmountCents, input.targetAmountCents,
+      input.targetDate, input.targetAmountCents == null ? null : householdDate().slice(0, 7), input.note, now, now],
   });
 }
 
-export async function updateReserve(id: string, input: { name: string; amountCents: number; note: string; isActive: boolean }): Promise<void> {
+export async function updateReserve(id: string, input: {
+  name: string;
+  fundedAmountCents: number;
+  targetAmountCents: number | null;
+  targetDate: string | null;
+  note: string;
+  isActive: boolean;
+}): Promise<void> {
   await ensureSchema();
-  const result = await db.execute({
-    sql: "UPDATE reserves SET name = ?, amount_cents = ?, note = ?, is_active = ?, updated_at = ?, is_demo = 0 WHERE id = ?",
-    args: [input.name, input.amountCents, input.note, Number(input.isActive), new Date().toISOString(), id],
-  });
+  const result = await db.execute(updateReserveStatement({
+    id,
+    ...input,
+    contributionMonth: householdDate().slice(0, 7),
+    now: new Date().toISOString(),
+  }));
   requireChanged(result.rowsAffected, "Reserve");
 }
 
@@ -427,11 +446,18 @@ function mapPlanned(row: Row): PlannedTransaction {
   };
 }
 
-function mapReserve(row: Row): Reserve {
-  return {
-    id: String(row.id), name: String(row.name), amountCents: Number(row.amount_cents), currency: String(row.currency),
-    note: String(row.note), isActive: Boolean(row.is_active), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+function mapReserve(row: Row, asOfDate: string): Reserve {
+  const reserve: Reserve = {
+    id: String(row.id), name: String(row.name), fundedAmountCents: Number(row.amount_cents),
+    targetAmountCents: row.target_amount_cents == null ? null : Number(row.target_amount_cents),
+    targetDate: row.target_date == null ? null : String(row.target_date),
+    contributionMonth: row.contribution_month == null ? null : String(row.contribution_month),
+    contributedThisMonthCents: Number(row.contribution_cents), requiredContributionCents: 0,
+    currency: String(row.currency), note: String(row.note), isActive: Boolean(row.is_active),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
+  reserve.requiredContributionCents = requiredGoalContributionCents(reserve, asOfDate);
+  return reserve;
 }
 
 function requireChanged(rowsAffected: number, entity: string): void {

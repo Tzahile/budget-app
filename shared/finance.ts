@@ -109,7 +109,13 @@ export function calculateDashboard(input: {
     .sort((a, b) => a.date.localeCompare(b.date) || a.description.localeCompare(b.description));
   const remainingIncomeCents = sum(upcoming.filter((o) => o.kind === "income"), (o) => o.amountCents);
   const remainingExpensesCents = sum(upcoming.filter((o) => o.kind === "expense"), (o) => o.amountCents);
-  const protectedReservesCents = sum(input.reserves.filter((r) => r.isActive), (r) => r.amountCents);
+  const activeReserves = input.reserves.filter((reserve) => reserve.isActive);
+  const fundedReservesCents = sum(activeReserves, (reserve) => reserve.fundedAmountCents);
+  const requiredGoalContributionsCents = sum(
+    activeReserves,
+    (reserve) => requiredGoalContributionCents(reserve, input.asOfDate),
+  );
+  const protectedReservesCents = fundedReservesCents + requiredGoalContributionsCents;
   const projectedMonthEndCents = currentCashCents + remainingIncomeCents - remainingExpensesCents;
   const safeToSpendCents = projectedMonthEndCents - protectedReservesCents;
 
@@ -121,11 +127,37 @@ export function calculateDashboard(input: {
     spentThisMonthCents,
     remainingIncomeCents,
     remainingExpensesCents,
+    fundedReservesCents,
+    requiredGoalContributionsCents,
     protectedReservesCents,
     projectedMonthEndCents,
     safeToSpendCents,
     upcoming,
   };
+}
+
+export function requiredGoalContributionCents(
+  reserve: Pick<Reserve, "fundedAmountCents" | "targetAmountCents" | "targetDate" |
+    "contributionMonth" | "contributedThisMonthCents" | "isActive">,
+  asOfDate: string,
+): number {
+  if (!reserve.isActive || reserve.targetAmountCents == null || reserve.targetDate == null) return 0;
+  assertDateOnly(asOfDate);
+  assertDateOnly(reserve.targetDate);
+  const [asOfYear, asOfMonth] = asOfDate.split("-").map(Number);
+  const [targetYear, targetMonth] = reserve.targetDate.split("-").map(Number);
+  const currentMonth = asOfDate.slice(0, 7);
+  const contributedThisMonth = reserve.contributionMonth === currentMonth
+    ? reserve.contributedThisMonthCents
+    : 0;
+  const fundedBeforeThisMonth = reserve.fundedAmountCents - contributedThisMonth;
+  const shortfallAtMonthStart = Math.max(0, reserve.targetAmountCents - fundedBeforeThisMonth);
+  if (shortfallAtMonthStart === 0) return 0;
+
+  const monthDistance = (targetYear - asOfYear) * 12 + targetMonth - asOfMonth;
+  const contributionMonths = Math.max(1, monthDistance + 1);
+  const scheduledContribution = Math.ceil(shortfallAtMonthStart / contributionMonths);
+  return Math.max(0, scheduledContribution - contributedThisMonth);
 }
 
 function sum<T>(items: T[], value: (item: T) => number): number {

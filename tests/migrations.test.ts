@@ -48,12 +48,15 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6]);
     expect(columns("accounts")).toContain("is_demo");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
     expect(tableExists("planned_completions")).toBe(true);
     expect(tableExists("account_reconciliations")).toBe(true);
+    expect(columns("reserves")).toEqual(expect.arrayContaining([
+      "target_amount_cents", "target_date", "contribution_month", "contribution_cents",
+    ]));
   });
 
   it("upgrades a version-one database without changing existing household data", async () => {
@@ -70,7 +73,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -85,18 +88,57 @@ describe("database migrations", () => {
       .toEqual(migrations.map((migration) => ({ version: migration.version, applied_at: appliedAt })));
   });
 
+  it("upgrades existing reserves to optional goals without changing funded money", async () => {
+    await migrateDatabase(database, migrations.slice(0, 4), () => appliedAt);
+    sqlite.prepare(`INSERT INTO reserves
+      (id, name, amount_cents, currency, note, is_active, created_at, updated_at, is_demo)
+      VALUES ('reserve-legacy', 'Emergency buffer', 300000, 'EUR', '', 1, ?, ?, 0)`)
+      .run(appliedAt, appliedAt);
+
+    await migrateDatabase(database, migrations, () => appliedAt);
+
+    expect(sqlite.prepare(`SELECT amount_cents, target_amount_cents, target_date,
+        contribution_month, contribution_cents
+      FROM reserves WHERE id = 'reserve-legacy'`).get()).toMatchObject({
+      amount_cents: 300_000,
+      target_amount_cents: null,
+      target_date: null,
+      contribution_month: null,
+      contribution_cents: 0,
+    });
+  });
+
+  it("upgrades an existing goal without treating its funded balance as a current-month contribution", async () => {
+    await migrateDatabase(database, migrations.slice(0, 5), () => appliedAt);
+    sqlite.prepare(`INSERT INTO reserves
+      (id, name, amount_cents, target_amount_cents, target_date, currency, note,
+        is_active, created_at, updated_at, is_demo)
+      VALUES ('goal-legacy', 'November goal', 200000, 600000, '2026-11-30',
+        'EUR', '', 1, ?, ?, 0)`)
+      .run(appliedAt, appliedAt);
+
+    await migrateDatabase(database, migrations, () => appliedAt);
+
+    expect(sqlite.prepare(`SELECT amount_cents, contribution_month, contribution_cents
+      FROM reserves WHERE id = 'goal-legacy'`).get()).toMatchObject({
+      amount_cents: 200_000,
+      contribution_month: null,
+      contribution_cents: 0,
+    });
+  });
+
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 5,
+      version: 7,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 5 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 7 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });
 

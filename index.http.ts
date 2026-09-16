@@ -196,20 +196,14 @@ app.delete("/api/planned/:id", async (c) => {
 
 app.post("/api/reserves", async (c) => {
   const body = await readBody(c.req.raw);
-  await createReserve({
-    name: stringField(body, "name", 80),
-    amountCents: centsField(body, "amountCents", true),
-    note: optionalString(body, "note", 300) ?? "",
-  });
+  await createReserve(reserveInput(body));
   return c.json({ ok: true }, 201);
 });
 
 app.put("/api/reserves/:id", async (c) => {
   const body = await readBody(c.req.raw);
   await updateReserve(safeId(c.req.param("id")), {
-    name: stringField(body, "name", 80),
-    amountCents: centsField(body, "amountCents", true),
-    note: optionalString(body, "note", 300) ?? "",
+    ...reserveInput(body),
     isActive: booleanField(body, "isActive", true),
   });
   return c.json({ ok: true });
@@ -278,6 +272,27 @@ function plannedInput(body: Record<string, unknown>) {
     nextDate,
     endDate,
     isActive: booleanField(body, "isActive", true),
+  };
+}
+
+function reserveInput(body: Record<string, unknown>) {
+  const targetAmount = body.targetAmountCents;
+  const targetDate = body.targetDate;
+  const hasTargetAmount = targetAmount != null;
+  const hasTargetDate = targetDate != null && targetDate !== "";
+  if (hasTargetAmount !== hasTargetDate) {
+    throw new ValidationError("targetAmountCents and targetDate must be provided together");
+  }
+  return {
+    name: stringField(body, "name", 80),
+    // Continue accepting the original field so existing API clients can keep
+    // creating simple reserves after the database field gains goal semantics.
+    fundedAmountCents: body.fundedAmountCents == null && body.amountCents != null
+      ? centsField(body, "amountCents", true)
+      : centsField(body, "fundedAmountCents", true),
+    targetAmountCents: hasTargetAmount ? centsField(body, "targetAmountCents") : null,
+    targetDate: hasTargetDate ? dateField(body, "targetDate") : null,
+    note: optionalString(body, "note", 300) ?? "",
   };
 }
 
