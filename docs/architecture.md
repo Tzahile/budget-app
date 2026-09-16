@@ -25,3 +25,7 @@ Synthetic demo records carry durable row-level provenance. Seed and cleanup
 operations use SQLite batch claims so serialized concurrent requests remain
 idempotent. Cleanup proceeds only when every stored entity row is demo-marked;
 legacy, real, or mixed datasets are never bulk-deleted.
+
+SQLite schema changes use ordered, transactional migrations with a persistent
+version ledger. Fresh installs and upgrades follow the same migration path; see
+[`database-migrations.md`](database-migrations.md) for the required conventions.

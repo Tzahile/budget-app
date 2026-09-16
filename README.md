@@ -22,8 +22,9 @@ committed this month, what is protected, and what remains safe to spend.
 
 All persisted money uses integer EUR cents. See
 [`docs/financial-semantics.md`](docs/financial-semantics.md) for the exact
-calculation rules and [`ROADMAP.md`](ROADMAP.md) for deferred imports, Open
-Banking and React Native work.
+calculation rules, [`docs/database-migrations.md`](docs/database-migrations.md)
+for schema-change conventions, and [`ROADMAP.md`](ROADMAP.md) for deferred
+imports, Open Banking and React Native work.
 
 ## Local checks
 
