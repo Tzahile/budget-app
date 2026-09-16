@@ -101,8 +101,26 @@ the funded amount.
 
 ```text
 projected month-end = current cash + remaining expected income - remaining committed expenses
-protected reserves  = funded active reserves + required goal contributions this month
+gross protection    = funded active reserves + required goal contributions this month
+protected reserves  = gross protection - linked coverage due this month
 safe to spend       = projected month-end - protected reserves
 ```
 
 Safe to spend may be negative; it is not clamped to zero.
+
+An active target-date reserve may be linked one-to-one to an active, one-off
+planned expense. The planned expense remains fully included in projected
+month-end cash, because paying it will reduce an account balance. When that
+expense is due this month or overdue, its linked goal protection overlaps the
+expense rather than creating a second safe-to-spend deduction:
+
+```text
+linked coverage     = min(planned expense, funded reserve + contribution still required)
+protected reserves  = gross protected reserves - linked coverage
+```
+
+Unlinked goals are unchanged. A partial goal covers only its protected amount;
+protection beyond the expense remains reserved. Inactive goals or planned items
+create no overlap. Deleting a planned item unlinks it automatically, while an
+inactive linked item keeps the association for later reactivation. Changing a
+linked item away from a one-off expense unlinks it.

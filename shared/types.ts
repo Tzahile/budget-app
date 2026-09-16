@@ -89,6 +89,7 @@ export interface Reserve {
   contributionMonth: string | null;
   contributedThisMonthCents: number;
   requiredContributionCents: number;
+  linkedPlannedTransactionId: string | null;
   currency: string;
   note: string;
   isActive: boolean;
@@ -102,6 +103,9 @@ export interface PlannedOccurrence {
   kind: PlannedKind;
   amountCents: number;
   date: string;
+  linkedReserveId: string | null;
+  linkedReserveName: string | null;
+  linkedGoalCoverageCents: number;
 }
 
 export interface DashboardSummary {
@@ -114,6 +118,7 @@ export interface DashboardSummary {
   remainingExpensesCents: number;
   fundedReservesCents: number;
   requiredGoalContributionsCents: number;
+  linkedGoalCoverageCents: number;
   protectedReservesCents: number;
   projectedMonthEndCents: number;
   safeToSpendCents: number;

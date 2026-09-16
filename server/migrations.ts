@@ -165,6 +165,15 @@ export const migrations: readonly Migration[] = [
       "ALTER TABLE reserves ADD COLUMN contribution_cents INTEGER NOT NULL DEFAULT 0 CHECK (contribution_cents >= 0)",
     ],
   },
+  {
+    version: 7,
+    name: "reserve planned obligation links",
+    statements: [
+      "ALTER TABLE reserves ADD COLUMN linked_planned_transaction_id TEXT REFERENCES planned_transactions(id) ON DELETE SET NULL",
+      `CREATE UNIQUE INDEX reserves_linked_planned_idx
+        ON reserves(linked_planned_transaction_id) WHERE linked_planned_transaction_id IS NOT NULL`,
+    ],
+  },
 ];
 
 export async function migrateDatabase(

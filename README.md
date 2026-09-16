@@ -13,7 +13,7 @@ committed this month, what is protected, and what remains safe to spend.
 - manual income and expenses with edit/delete balance reversal
 - recurring and one-off planned income/expenses
 - mark planned items paid/received, then safely undo or correct the latest completion
-- protected reserves and target-date sinking funds
+- protected reserves and target-date sinking funds linked safely to one-off planned expenses
 - projected month-end and safe-to-spend dashboard
 - responsive mobile/desktop React UI
 - explicit synthetic demo dataset

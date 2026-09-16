@@ -48,7 +48,7 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(columns("accounts")).toContain("is_demo");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
@@ -56,6 +56,7 @@ describe("database migrations", () => {
     expect(tableExists("account_reconciliations")).toBe(true);
     expect(columns("reserves")).toEqual(expect.arrayContaining([
       "target_amount_cents", "target_date", "contribution_month", "contribution_cents",
+      "linked_planned_transaction_id",
     ]));
   });
 
@@ -73,7 +74,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -127,18 +128,40 @@ describe("database migrations", () => {
     });
   });
 
+  it("enforces one goal per planned obligation and clears links when the obligation is deleted", async () => {
+    await migrateDatabase(database, migrations, () => appliedAt);
+    sqlite.prepare(`INSERT INTO planned_transactions
+      (id, account_id, description, kind, amount_cents, currency, recurrence, interval_count,
+        next_date, end_date, is_active, created_at, updated_at)
+      VALUES ('planned-car', NULL, 'Car payment', 'expense', 600000, 'EUR', 'once', 1,
+        '2026-11-30', NULL, 1, ?, ?)`).run(appliedAt, appliedAt);
+    const insertReserve = sqlite.prepare(`INSERT INTO reserves
+      (id, name, amount_cents, target_amount_cents, target_date, contribution_month,
+        contribution_cents, linked_planned_transaction_id, currency, note, is_active,
+        created_at, updated_at, is_demo)
+      VALUES (?, ?, 0, 600000, '2026-11-30', '2026-09', 0, 'planned-car',
+        'EUR', '', 1, ?, ?, 0)`);
+    insertReserve.run("goal-car", "Car goal", appliedAt, appliedAt);
+
+    expect(() => insertReserve.run("goal-duplicate", "Duplicate", appliedAt, appliedAt))
+      .toThrow(/unique/i);
+    sqlite.prepare("DELETE FROM planned_transactions WHERE id = 'planned-car'").run();
+    expect(sqlite.prepare("SELECT linked_planned_transaction_id FROM reserves WHERE id = 'goal-car'").get())
+      .toMatchObject({ linked_planned_transaction_id: null });
+  });
+
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 7,
+      version: 8,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 7 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 8 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 });
 
