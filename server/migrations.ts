@@ -157,6 +157,14 @@ export const migrations: readonly Migration[] = [
       "ALTER TABLE reserves ADD COLUMN target_date TEXT CHECK ((target_amount_cents IS NULL) = (target_date IS NULL))",
     ],
   },
+  {
+    version: 6,
+    name: "reserve monthly contribution progress",
+    statements: [
+      "ALTER TABLE reserves ADD COLUMN contribution_month TEXT CHECK (contribution_month IS NULL OR length(contribution_month) = 7)",
+      "ALTER TABLE reserves ADD COLUMN contribution_cents INTEGER NOT NULL DEFAULT 0 CHECK (contribution_cents >= 0)",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

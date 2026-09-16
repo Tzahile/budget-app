@@ -137,20 +137,27 @@ export function calculateDashboard(input: {
 }
 
 export function requiredGoalContributionCents(
-  reserve: Pick<Reserve, "fundedAmountCents" | "targetAmountCents" | "targetDate" | "isActive">,
+  reserve: Pick<Reserve, "fundedAmountCents" | "targetAmountCents" | "targetDate" |
+    "contributionMonth" | "contributedThisMonthCents" | "isActive">,
   asOfDate: string,
 ): number {
   if (!reserve.isActive || reserve.targetAmountCents == null || reserve.targetDate == null) return 0;
   assertDateOnly(asOfDate);
   assertDateOnly(reserve.targetDate);
-  const remaining = Math.max(0, reserve.targetAmountCents - reserve.fundedAmountCents);
-  if (remaining === 0) return 0;
-
   const [asOfYear, asOfMonth] = asOfDate.split("-").map(Number);
   const [targetYear, targetMonth] = reserve.targetDate.split("-").map(Number);
+  const currentMonth = asOfDate.slice(0, 7);
+  const contributedThisMonth = reserve.contributionMonth === currentMonth
+    ? reserve.contributedThisMonthCents
+    : 0;
+  const fundedBeforeThisMonth = reserve.fundedAmountCents - contributedThisMonth;
+  const shortfallAtMonthStart = Math.max(0, reserve.targetAmountCents - fundedBeforeThisMonth);
+  if (shortfallAtMonthStart === 0) return 0;
+
   const monthDistance = (targetYear - asOfYear) * 12 + targetMonth - asOfMonth;
   const contributionMonths = Math.max(1, monthDistance + 1);
-  return Math.floor(remaining / contributionMonths) + (remaining % contributionMonths === 0 ? 0 : 1);
+  const scheduledContribution = Math.ceil(shortfallAtMonthStart / contributionMonths);
+  return Math.max(0, scheduledContribution - contributedThisMonth);
 }
 
 function sum<T>(items: T[], value: (item: T) => number): number {

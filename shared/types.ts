@@ -86,6 +86,8 @@ export interface Reserve {
   fundedAmountCents: number;
   targetAmountCents: number | null;
   targetDate: string | null;
+  contributionMonth: string | null;
+  contributedThisMonthCents: number;
   requiredContributionCents: number;
   currency: string;
   note: string;

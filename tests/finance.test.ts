@@ -20,7 +20,8 @@ const planned = (overrides: Partial<PlannedTransaction> = {}): PlannedTransactio
 });
 const reserve = (amountCents: number, overrides: Partial<Reserve> = {}): Reserve => ({
   id: crypto.randomUUID(), name: "Buffer", fundedAmountCents: amountCents, targetAmountCents: null,
-  targetDate: null, requiredContributionCents: 0, currency: "EUR", note: "", isActive: true,
+  targetDate: null, contributionMonth: null, contributedThisMonthCents: 0,
+  requiredContributionCents: 0, currency: "EUR", note: "", isActive: true,
   createdAt: now, updatedAt: now, ...overrides,
 });
 
@@ -109,6 +110,18 @@ describe("reserve goals", () => {
     expect(result.safeToSpendCents).toBe(500_000);
   });
 
+  it("does not require September twice after its contribution is funded and rolls forward in October", () => {
+    const fundedInSeptember = reserve(200_000, {
+      targetAmountCents: 600_000,
+      targetDate: "2026-11-30",
+      contributionMonth: "2026-09",
+      contributedThisMonthCents: 200_000,
+    });
+
+    expect(requiredGoalContributionCents(fundedInSeptember, "2026-09-20")).toBe(0);
+    expect(requiredGoalContributionCents(fundedInSeptember, "2026-10-01")).toBe(200_000);
+  });
+
   it("uses funded progress and rounds the contribution up to whole cents", () => {
     const goal = reserve(100_000, { targetAmountCents: 600_000, targetDate: "2026-11-30" });
     expect(requiredGoalContributionCents(goal, "2026-09-12")).toBe(166_667);
@@ -124,6 +137,26 @@ describe("reserve goals", () => {
       reserve(0, { targetAmountCents: 100, targetDate: "2026-11-30" }),
       "2026-09-12",
     )).toBe(34);
+    expect(requiredGoalContributionCents(
+      reserve(10, {
+        targetAmountCents: 100,
+        targetDate: "2026-11-30",
+        contributionMonth: "2026-09",
+        contributedThisMonthCents: 10,
+      }),
+      "2026-09-12",
+    )).toBe(24);
+  });
+
+  it("recalculates an edited target from the month-start baseline without losing recorded funding", () => {
+    const editedGoal = reserve(200_000, {
+      targetAmountCents: 900_000,
+      targetDate: "2026-11-30",
+      contributionMonth: "2026-09",
+      contributedThisMonthCents: 200_000,
+    });
+
+    expect(requiredGoalContributionCents(editedGoal, "2026-09-20")).toBe(100_000);
   });
 
   it("requires the entire remaining shortfall for current-month and overdue goals", () => {

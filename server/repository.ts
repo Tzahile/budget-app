@@ -24,6 +24,7 @@ import {
   undoPlannedStatements,
 } from "./planned-operations.ts";
 import { reconcileAccountStatements } from "./reconciliation-operations.ts";
+import { updateReserveStatement } from "./reserve-operations.ts";
 
 type Row = Record<string, unknown>;
 
@@ -287,10 +288,11 @@ export async function createReserve(input: {
   const now = new Date().toISOString();
   await db.execute({
     sql: `INSERT INTO reserves
-      (id, name, amount_cents, target_amount_cents, target_date, currency, note, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'EUR', ?, 1, ?, ?)`,
+      (id, name, amount_cents, target_amount_cents, target_date, contribution_month,
+        contribution_cents, currency, note, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 0, 'EUR', ?, 1, ?, ?)`,
     args: [crypto.randomUUID(), input.name, input.fundedAmountCents, input.targetAmountCents,
-      input.targetDate, input.note, now, now],
+      input.targetDate, input.targetAmountCents == null ? null : householdDate().slice(0, 7), input.note, now, now],
   });
 }
 
@@ -303,12 +305,12 @@ export async function updateReserve(id: string, input: {
   isActive: boolean;
 }): Promise<void> {
   await ensureSchema();
-  const result = await db.execute({
-    sql: `UPDATE reserves SET name = ?, amount_cents = ?, target_amount_cents = ?, target_date = ?,
-      note = ?, is_active = ?, updated_at = ?, is_demo = 0 WHERE id = ?`,
-    args: [input.name, input.fundedAmountCents, input.targetAmountCents, input.targetDate,
-      input.note, Number(input.isActive), new Date().toISOString(), id],
-  });
+  const result = await db.execute(updateReserveStatement({
+    id,
+    ...input,
+    contributionMonth: householdDate().slice(0, 7),
+    now: new Date().toISOString(),
+  }));
   requireChanged(result.rowsAffected, "Reserve");
 }
 
@@ -448,7 +450,9 @@ function mapReserve(row: Row, asOfDate: string): Reserve {
   const reserve: Reserve = {
     id: String(row.id), name: String(row.name), fundedAmountCents: Number(row.amount_cents),
     targetAmountCents: row.target_amount_cents == null ? null : Number(row.target_amount_cents),
-    targetDate: row.target_date == null ? null : String(row.target_date), requiredContributionCents: 0,
+    targetDate: row.target_date == null ? null : String(row.target_date),
+    contributionMonth: row.contribution_month == null ? null : String(row.contribution_month),
+    contributedThisMonthCents: Number(row.contribution_cents), requiredContributionCents: 0,
     currency: String(row.currency), note: String(row.note), isActive: Boolean(row.is_active),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
