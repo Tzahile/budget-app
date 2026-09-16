@@ -132,6 +132,23 @@ export const migrations: readonly Migration[] = [
       "CREATE INDEX planned_completions_plan_idx ON planned_completions(planned_transaction_id, created_at DESC)",
     ],
   },
+  {
+    version: 4,
+    name: "account balance reconciliation",
+    statements: [
+      `CREATE TABLE account_reconciliations (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        date TEXT NOT NULL,
+        previous_balance_cents INTEGER NOT NULL,
+        actual_balance_cents INTEGER NOT NULL,
+        difference_cents INTEGER NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      )`,
+      "CREATE INDEX account_reconciliations_account_date_idx ON account_reconciliations(account_id, date DESC, created_at DESC)",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

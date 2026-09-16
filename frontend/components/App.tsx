@@ -11,6 +11,7 @@ type Editor =
   | { type: "planned"; item?: PlannedTransaction }
   | { type: "reserve"; item?: Reserve }
   | { type: "correction"; item: PlannedCompletion }
+  | { type: "reconciliation"; item: Account }
   | null;
 
 interface Session {
@@ -131,7 +132,7 @@ export function App() {
         ) : view === "reserves" ? (
           <Reserves data={data} onAdd={() => setEditor({ type: "reserve" })} onEdit={(item) => setEditor({ type: "reserve", item })} onDelete={(id) => confirmed("Delete this reserve?") && mutate(`/api/reserves/${id}`, "DELETE")} />
         ) : (
-          <Accounts data={data} onAdd={() => setEditor({ type: "account" })} onEdit={(item) => setEditor({ type: "account", item })} onDelete={(id) => confirmed("Delete this empty account?") && mutate(`/api/accounts/${id}`, "DELETE")} />
+          <Accounts data={data} onAdd={() => setEditor({ type: "account" })} onEdit={(item) => setEditor({ type: "account", item })} onReconcile={(item) => setEditor({ type: "reconciliation", item })} onDelete={(id) => confirmed("Delete this empty account?") && mutate(`/api/accounts/${id}`, "DELETE")} />
         )}
       </main>
 
@@ -143,6 +144,10 @@ export function App() {
               ...(payload as Record<string, unknown>),
               expectedEffectiveTransactionId: editor.item.effectiveTransaction!.id,
             });
+            return;
+          }
+          if (editor.type === "reconciliation") {
+            await mutate(`/api/accounts/${editor.item.id}/reconcile`, "POST", payload);
             return;
           }
           const base = editor.type === "transaction" ? "/api/transactions" : editor.type === "planned" ? "/api/planned" : editor.type === "reserve" ? "/api/reserves" : "/api/accounts";
@@ -222,14 +227,15 @@ function Reserves({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () 
   return <Page title="Protected reserves" subtitle="This money remains in your accounts but is excluded from safe-to-spend." action="Add reserve" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2">{data.reserves.length === 0 ? <Card><EmptyLine>No reserves yet.</EmptyLine></Card> : data.reserves.map((item) => <Card key={item.id} inactive={!item.isActive}><div className="flex items-start justify-between gap-4"><div><h3 className="font-semibold">{item.name}</h3><p className="mt-1 text-sm text-stone-500">{item.note || "Protected funds"}</p></div><p className="text-xl font-semibold">{money(item.amountCents)}</p></div><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div></Page>;
 }
 
-function Accounts({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Account) => void; onDelete: (id: string) => void }) {
-  return <Page title="Accounts" subtitle="Balances are your current cleared balances, not opening balances." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div></Page>;
+function Accounts({ data, onAdd, onEdit, onReconcile, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Account) => void; onReconcile: (item: Account) => void; onDelete: (id: string) => void }) {
+  const accounts = useMemo(() => Object.fromEntries(data.accounts.map((account) => [account.id, account.name])), [data.accounts]);
+  return <Page title="Accounts" subtitle="Balances are current cleared amounts. Use reconciliation to align one with the bank." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton>{item.isActive && <SmallButton primary onClick={() => onReconcile(item)}>Reconcile</SmallButton>}<SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div>{data.accountReconciliations.length > 0 && <section className="mt-8"><SectionTitle title="Reconciliation history" subtitle="Balance checkpoints retained for audit" /><div className="mt-3 divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.accountReconciliations.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 py-4"><div className="min-w-0 flex-1"><p className="font-medium">{accounts[item.accountId] ?? "Unknown account"}</p><p className="text-xs text-stone-400">{prettyDate(item.date)} · {money(item.previousBalanceCents)} → {money(item.actualBalanceCents)}{item.note ? ` · ${item.note}` : ""}</p></div><Amount cents={item.differenceCents} /></div>)}</div></section>}</Page>;
 }
 
 function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNullable<Editor>; data: AppData; busy: boolean; onClose: () => void; onSave: (payload: unknown) => Promise<void> }) {
   const item = editor.item;
   const baseDate = today();
-  const initial = editor.type === "correction" ? { amount: euros(Math.abs(editor.item.effectiveTransaction?.amountCents ?? 0)), date: editor.item.effectiveTransaction?.date ?? baseDate, accountId: editor.item.effectiveTransaction?.accountId ?? data.accounts[0]?.id ?? "" } : editor.item ? itemToForm(editor.type, editor.item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", amount: "", note: "", isActive: true };
+  const initial = editor.type === "correction" ? { amount: euros(Math.abs(editor.item.effectiveTransaction?.amountCents ?? 0)), date: editor.item.effectiveTransaction?.date ?? baseDate, accountId: editor.item.effectiveTransaction?.accountId ?? data.accounts[0]?.id ?? "" } : editor.type === "reconciliation" ? { actualBalance: euros(editor.item.balanceCents), date: baseDate, note: "" } : editor.item ? itemToForm(editor.type, editor.item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", amount: "", note: "", isActive: true };
   const [form, setForm] = useState<Record<string, string | boolean>>(initial);
   const [formError, setFormError] = useState("");
   const set = (key: string) => (event: FormEvent<Element>) => {
@@ -242,8 +248,11 @@ function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNulla
     try {
       const amountCents = editor.type === "account"
         ? parseMoney(String(form.balance), true)
+        : editor.type === "reconciliation"
+        ? parseMoney(String(form.actualBalance), true)
         : parseMoney(String(form.amount));
       const payload = editor.type === "correction" ? { amountCents, date: form.date, accountId: form.accountId }
+        : editor.type === "reconciliation" ? { actualBalanceCents: amountCents, date: form.date, note: form.note }
         : editor.type === "account" ? { name: form.name, type: form.type, balanceCents: amountCents, isActive: form.isActive ?? true }
         : editor.type === "transaction" ? { description: form.description, kind: form.kind, amountCents, date: form.date, accountId: form.accountId }
         : editor.type === "planned" ? { description: form.description, kind: form.kind, amountCents, nextDate: form.nextDate, recurrence: form.recurrence, intervalCount: Number(form.intervalCount), endDate: form.endDate || null, accountId: form.accountId || null, isActive: form.isActive ?? true }
@@ -253,16 +262,17 @@ function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNulla
       setFormError(messageOf(err));
     }
   };
-  const title = editor.type === "correction" ? "Correct completion" : `${item ? "Edit" : "Add"} ${editor.type === "planned" ? "planned item" : editor.type}`;
+  const title = editor.type === "correction" ? "Correct completion" : editor.type === "reconciliation" ? `Reconcile ${editor.item.name}` : `${item ? "Edit" : "Add"} ${editor.type === "planned" ? "planned item" : editor.type}`;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-stone-950 bg-opacity-50 p-0 sm:items-center sm:p-6" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div role="dialog" aria-modal="true" aria-labelledby="editor-title" className="max-h-screen w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-2xl sm:max-w-lg sm:rounded-3xl sm:p-7">
         <div className="flex items-center justify-between"><h2 id="editor-title" className="text-xl font-semibold capitalize">{title}</h2><button className="rounded-full p-2 text-xl text-stone-400 hover:bg-stone-100" onClick={onClose} aria-label="Close">×</button></div>
         <form className="mt-6 grid gap-4" onSubmit={submit}>
-          {editor.type === "account" && <><Field label="Account name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><Field label="Account type"><select value={String(form.type)} onChange={set("type")} className={inputClass}><option value="checking">Checking</option><option value="savings">Savings</option><option value="cash">Cash</option></select></Field><MoneyField label="Current balance" value={String(form.balance)} onInput={set("balance")} allowNegative /></>}
+          {editor.type === "account" && <><Field label="Account name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><Field label="Account type"><select value={String(form.type)} onChange={set("type")} className={inputClass}><option value="checking">Checking</option><option value="savings">Savings</option><option value="cash">Cash</option></select></Field>{!item && <MoneyField label="Current balance" value={String(form.balance)} onInput={set("balance")} allowNegative />}</>}
           {editor.type === "transaction" && <><Field label="Description"><input required maxLength={160} value={String(form.description)} onInput={set("description")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Type"><select value={String(form.kind)} onChange={set("kind")} className={inputClass}><option value="expense">Expense</option><option value="income">Income</option></select></Field><MoneyField label="Amount" value={String(form.amount)} onInput={set("amount")} /></div><Field label="Date"><input type="date" required value={String(form.date)} onInput={set("date")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} /></>}
           {editor.type === "planned" && <><Field label="Description"><input required maxLength={160} value={String(form.description)} onInput={set("description")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Type"><select value={String(form.kind)} onChange={set("kind")} className={inputClass}><option value="expense">Expense</option><option value="income">Income</option></select></Field><MoneyField label="Amount" value={String(form.amount)} onInput={set("amount")} /></div><Field label="Next due date"><input type="date" required value={String(form.nextDate)} onInput={set("nextDate")} className={inputClass} /></Field><div className="grid grid-cols-2 gap-3"><Field label="Repeats"><select value={String(form.recurrence)} onChange={set("recurrence")} className={inputClass}><option value="once">Once</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></Field><Field label="Every"><input type="number" min="1" max="99" required value={String(form.intervalCount)} onInput={set("intervalCount")} className={inputClass} /></Field></div><Field label="End date (optional)"><input type="date" value={String(form.endDate)} onInput={set("endDate")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} optional /></>}
           {editor.type === "correction" && <><MoneyField label="Correct amount" value={String(form.amount)} onInput={set("amount")} /><Field label="Correct date"><input type="date" required value={String(form.date)} onInput={set("date")} className={inputClass} /></Field><AccountSelect accounts={data.accounts} value={String(form.accountId)} onChange={set("accountId")} /></>}
+          {editor.type === "reconciliation" && <><p className="text-sm text-stone-500">Current BudgetApp balance: <strong>{money(editor.item.balanceCents)}</strong></p><MoneyField label="Actual cleared balance" value={String(form.actualBalance)} onInput={set("actualBalance")} allowNegative /><Field label="Reconciliation date"><input type="date" required value={String(form.date)} onInput={set("date")} className={inputClass} /></Field><Field label="Note (optional)"><textarea maxLength={300} rows={3} value={String(form.note)} onInput={set("note")} className={inputClass} /></Field></>}
           {editor.type === "reserve" && <><Field label="Reserve name"><input required maxLength={80} value={String(form.name)} onInput={set("name")} className={inputClass} /></Field><MoneyField label="Protected amount" value={String(form.amount)} onInput={set("amount")} /><Field label="Note (optional)"><textarea maxLength={300} rows={3} value={String(form.note)} onInput={set("note")} className={inputClass} /></Field></>}
           {item && (editor.type === "account" || editor.type === "planned" || editor.type === "reserve") && <label className="flex items-center gap-3 text-sm"><input type="checkbox" checked={Boolean(form.isActive)} onChange={set("isActive")} className="h-4 w-4 accent-green-800" /> Active</label>}
           {formError && <p className="text-sm text-red-700">{formError}</p>}
@@ -307,7 +317,7 @@ function AccountSelect({ accounts, value, onChange, optional }: { accounts: Acco
 
 const inputClass = "w-full box-border rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-base outline-none focus:border-green-700 focus:ring-2 focus:ring-green-100";
 
-function itemToForm(type: Exclude<NonNullable<Editor>["type"], "correction">, item: Account | Transaction | PlannedTransaction | Reserve): Record<string, string | boolean> {
+function itemToForm(type: Exclude<NonNullable<Editor>["type"], "correction" | "reconciliation">, item: Account | Transaction | PlannedTransaction | Reserve): Record<string, string | boolean> {
   if (type === "account") { const a = item as Account; return { name: a.name, type: a.type, balance: euros(a.balanceCents), isActive: a.isActive }; }
   if (type === "transaction") { const t = item as Transaction; return { description: t.description, kind: t.kind, amount: euros(Math.abs(t.amountCents)), date: t.date, accountId: t.accountId }; }
   if (type === "planned") { const p = item as PlannedTransaction; return { description: p.description, kind: p.kind, amount: euros(p.amountCents), nextDate: p.nextDate, recurrence: p.recurrence, intervalCount: String(p.intervalCount), endDate: p.endDate ?? "", accountId: p.accountId ?? "", isActive: p.isActive }; }
