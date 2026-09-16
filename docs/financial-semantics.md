@@ -43,6 +43,26 @@ Marking an occurrence paid or received atomically:
 2. changes the selected account balance;
 3. advances the planned item's next date, or deactivates a one-off/ended item.
 
+Each completion also stores an immutable audit record with the exact unpaid
+recurrence state from before and after completion. Only the latest completion
+of an otherwise unchanged planned item is adjustable. This eligibility is
+derived by the server and enforced again atomically, so a stale browser cannot
+undo a newer completion or overwrite a later edit.
+Adjustment requests also include the effective transaction ID displayed to the
+user. The atomic claim must still match that ID, preventing two correction or
+undo requests based on the same version from both succeeding.
+
+Undo voids (but does not delete) the original transaction, reverses its exact
+account balance effect, and restores the captured unpaid date and active state.
+Correction voids the current effective transaction and creates one linked
+replacement with the corrected date, account, and amount. The recurrence
+remains advanced. A corrected completion remains adjustable, so another
+correction appends to the audit chain and undo reverses the latest effective
+transaction. History exposes both the immutable original and current effective
+record.
+Voided transactions are excluded from account activity and dashboard totals;
+completion history remains available for audit.
+
 Monthly and yearly recurrences that target an invalid day are clamped to the
 last day of the target month.
 

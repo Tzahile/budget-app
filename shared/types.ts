@@ -33,8 +33,24 @@ export interface Transaction {
   source: "manual" | "import" | "planned";
   transferGroupId: string | null;
   plannedTransactionId: string | null;
+  correctedFromTransactionId: string | null;
+  voidedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PlannedCompletion {
+  id: string;
+  plannedTransactionId: string;
+  originalTransactionId: string;
+  correctionTransactionId: string | null;
+  occurrenceDate: string;
+  completedAt: string;
+  adjustedAt: string | null;
+  status: "completed" | "undone" | "corrected";
+  adjustable: boolean;
+  originalTransaction: Transaction;
+  effectiveTransaction: Transaction | null;
 }
 
 export interface PlannedTransaction {
@@ -91,6 +107,7 @@ export interface AppData {
   accounts: Account[];
   transactions: Transaction[];
   plannedTransactions: PlannedTransaction[];
+  plannedCompletions: PlannedCompletion[];
   reserves: Reserve[];
   demoDataState: DemoDataState;
 }

@@ -65,6 +65,24 @@ async function migrate(): Promise<void> {
     `CREATE UNIQUE INDEX IF NOT EXISTS transactions_import_identity_idx
       ON transactions(import_identity) WHERE import_identity IS NOT NULL`,
     `CREATE INDEX IF NOT EXISTS transactions_date_idx ON transactions(date)`,
+    `CREATE TABLE IF NOT EXISTS planned_completions (
+      id TEXT PRIMARY KEY,
+      planned_transaction_id TEXT NOT NULL REFERENCES planned_transactions(id) ON DELETE RESTRICT,
+      transaction_id TEXT NOT NULL UNIQUE REFERENCES transactions(id) ON DELETE RESTRICT,
+      correction_transaction_id TEXT UNIQUE REFERENCES transactions(id) ON DELETE RESTRICT,
+      occurrence_date TEXT NOT NULL,
+      previous_next_date TEXT NOT NULL,
+      previous_is_active INTEGER NOT NULL CHECK (previous_is_active IN (0, 1)),
+      completed_next_date TEXT NOT NULL,
+      completed_is_active INTEGER NOT NULL CHECK (completed_is_active IN (0, 1)),
+      completed_revision INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('completed', 'undone', 'corrected')),
+      operation_token TEXT,
+      last_operation_token TEXT,
+      created_at TEXT NOT NULL,
+      adjusted_at TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS planned_completions_plan_idx ON planned_completions(planned_transaction_id, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS reserves (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -96,8 +114,8 @@ async function migrate(): Promise<void> {
       args: [1, new Date().toISOString()],
     },
   ]);
-
   await applyDemoProvenanceMigration();
+  await applyPlannedCompletionMigration();
 }
 
 async function applyDemoProvenanceMigration(): Promise<void> {
@@ -118,4 +136,26 @@ async function applyDemoProvenanceMigration(): Promise<void> {
     sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?)",
     args: [new Date().toISOString()],
   });
+}
+
+async function applyPlannedCompletionMigration(): Promise<void> {
+  await addColumnIfMissing("planned_transactions", "revision", "INTEGER NOT NULL DEFAULT 0");
+  await addColumnIfMissing("planned_transactions", "latest_completion_id", "TEXT");
+  await addColumnIfMissing("transactions", "corrected_from_transaction_id", "TEXT REFERENCES transactions(id) ON DELETE RESTRICT");
+  await addColumnIfMissing("transactions", "voided_at", "TEXT");
+  await addColumnIfMissing("planned_completions", "last_operation_token", "TEXT");
+  await db.execute({
+    sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+    args: [3, new Date().toISOString()],
+  });
+}
+
+async function addColumnIfMissing(table: string, column: string, definition: string): Promise<void> {
+  const columns = await db.execute(`PRAGMA table_info(${table})`);
+  if (columns.rows.some((row) => String(row.name) === column)) return;
+  try {
+    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (error) {
+    if (!/duplicate column name/i.test(error instanceof Error ? error.message : String(error))) throw error;
+  }
 }
