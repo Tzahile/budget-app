@@ -123,6 +123,22 @@ export interface DashboardSummary {
   projectedMonthEndCents: number;
   safeToSpendCents: number;
   upcoming: PlannedOccurrence[];
+  projectionMonths: CashFlowProjectionMonth[];
+}
+
+/** A deterministic forecast month. Advisory safe-spending guidance is separate. */
+export interface CashFlowProjectionMonth {
+  monthStart: string;
+  monthEnd: string;
+  openingCashCents: number;
+  expectedIncomeCents: number;
+  committedExpensesCents: number;
+  monthlyGoalContributionsCents: number;
+  protectedReservesCents: number;
+  linkedGoalCoverageCents: number;
+  projectedMonthEndCents: number;
+  availableToSpendCents: number;
+  upcoming: PlannedOccurrence[];
 }
 
 export interface AppData {
