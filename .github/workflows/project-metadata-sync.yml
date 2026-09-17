@@ -3,6 +3,11 @@ name: Sync issue metadata to project
 on:
   issues:
     types: [opened, edited, reopened]
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/project-metadata-sync.yml
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,28 +17,17 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync issue into BudgetApp project
+      - name: Sync issue metadata into BudgetApp project
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PROJECT_TOKEN }}
           script: |
+            const owner = 'Tzahile';
+            const repo = 'budget-app';
             const projectTitle = "@Tzahile's budgetApp project";
-            const body = context.payload.issue.body || '';
-            const issueId = context.payload.issue.node_id;
 
-            const readMeta = (name) => {
-              const m = body.match(new RegExp(`\\*\\*${name}:\\*\\*\\s*([^\\n\\r]+)`, 'i'));
-              return m ? m[1].trim() : null;
-            };
-
-            const desired = {
-              Priority: readMeta('Priority'),
-              Area: readMeta('Area'),
-              Effort: readMeta('Effort'),
-            };
-
-            const result = await github.graphql(`
-              query($issueId: ID!) {
+            const projectResult = await github.graphql(`
+              query {
                 viewer {
                   login
                   projectsV2(first: 100) {
@@ -52,38 +46,22 @@ jobs:
                     }
                   }
                 }
-                node(id: $issueId) {
-                  ... on Issue {
-                    projectItems(first: 100) {
-                      nodes { id project { id title } }
-                    }
-                  }
-                }
               }
-            `, { issueId });
+            `);
 
-            const project = result.viewer?.projectsV2?.nodes?.find(p => p.title === projectTitle);
+            const project = projectResult.viewer?.projectsV2?.nodes?.find(p => p.title === projectTitle);
             if (!project) {
-              const names = result.viewer?.projectsV2?.nodes?.map(p => p.title).join(', ') || '(none)';
-              core.setFailed(`Project '${projectTitle}' not found for ${result.viewer?.login}. Visible projects: ${names}`);
+              const names = projectResult.viewer?.projectsV2?.nodes?.map(p => p.title).join(', ') || '(none)';
+              core.setFailed(`Project '${projectTitle}' not found. Visible projects: ${names}`);
               return;
             }
 
-            let item = result.node?.projectItems?.nodes?.find(i => i.project.id === project.id);
-            const isNewItem = !item;
+            const readMeta = (body, name) => {
+              const m = (body || '').match(new RegExp(`\\*\\*${name}:\\*\\*\\s*([^\\n\\r]+)`, 'i'));
+              return m ? m[1].trim() : null;
+            };
 
-            if (!item) {
-              const added = await github.graphql(`
-                mutation($projectId: ID!, $contentId: ID!) {
-                  addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
-                    item { id }
-                  }
-                }
-              `, { projectId: project.id, contentId: issueId });
-              item = added.addProjectV2ItemById.item;
-            }
-
-            const setSelect = async (fieldName, optionName) => {
+            const setSelect = async (itemId, fieldName, optionName) => {
               if (!optionName) return;
               const field = project.fields.nodes.find(f => f?.name === fieldName);
               if (!field) {
@@ -106,15 +84,71 @@ jobs:
                 }
               `, {
                 projectId: project.id,
-                itemId: item.id,
+                itemId,
                 fieldId: field.id,
                 optionId: option.id,
               });
             };
 
-            await setSelect('Priority', desired.Priority);
-            await setSelect('Area', desired.Area);
-            await setSelect('Effort', desired.Effort);
-            if (isNewItem) await setSelect('Status', 'Backlog');
+            const syncIssue = async (issue) => {
+              let item = issue.projectItems?.nodes?.find(i => i.project.id === project.id);
+              const isNewItem = !item;
 
-            core.info(`Synced issue #${context.payload.issue.number} to ${projectTitle}.`);
+              if (!item) {
+                const added = await github.graphql(`
+                  mutation($projectId: ID!, $contentId: ID!) {
+                    addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+                      item { id }
+                    }
+                  }
+                `, { projectId: project.id, contentId: issue.id });
+                item = added.addProjectV2ItemById.item;
+              }
+
+              await setSelect(item.id, 'Priority', readMeta(issue.body, 'Priority'));
+              await setSelect(item.id, 'Area', readMeta(issue.body, 'Area'));
+              await setSelect(item.id, 'Effort', readMeta(issue.body, 'Effort'));
+              if (isNewItem) await setSelect(item.id, 'Status', 'Backlog');
+              core.info(`Synced issue #${issue.number}`);
+            };
+
+            if (context.eventName === 'issues') {
+              const issueId = context.payload.issue.node_id;
+              const result = await github.graphql(`
+                query($issueId: ID!) {
+                  node(id: $issueId) {
+                    ... on Issue {
+                      id
+                      number
+                      body
+                      projectItems(first: 100) {
+                        nodes { id project { id title } }
+                      }
+                    }
+                  }
+                }
+              `, { issueId });
+              await syncIssue(result.node);
+              return;
+            }
+
+            const all = await github.graphql(`
+              query($owner: String!, $repo: String!) {
+                repository(owner: $owner, name: $repo) {
+                  issues(first: 100, states: OPEN, orderBy: {field: CREATED_AT, direction: ASC}) {
+                    nodes {
+                      id
+                      number
+                      body
+                      projectItems(first: 100) {
+                        nodes { id project { id title } }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { owner, repo });
+
+            for (const issue of all.repository.issues.nodes) {
+              await syncIssue(issue);
+            }
