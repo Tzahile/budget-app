@@ -1,0 +1,141 @@
+name: Project status automation
+
+on:
+  create:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  update-project-status:
+    if: >-
+      (github.event_name == 'create' && github.event.ref_type == 'branch') ||
+      github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update linked issue project status
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const owner = 'Tzahile';
+            const repo = 'budget-app';
+            const projectTitle = 'BudgetApp';
+
+            const branch = context.eventName === 'create'
+              ? context.payload.ref
+              : context.payload.pull_request.head.ref;
+
+            const match = branch.match(/^issue-(\d+)(?:-|$)/i);
+            if (!match) {
+              core.info(`Branch '${branch}' does not match issue-<number>-..., skipping.`);
+              return;
+            }
+
+            const issueNumber = Number(match[1]);
+            const targetStatus = context.eventName === 'create'
+              ? 'In Progress'
+              : 'In Review';
+
+            const projectResult = await github.graphql(`
+              query($login: String!) {
+                user(login: $login) {
+                  projectsV2(first: 100) {
+                    nodes { id number title }
+                  }
+                }
+              }
+            `, { login: owner });
+
+            const project = projectResult.user?.projectsV2?.nodes?.find(
+              p => p.title === projectTitle
+            );
+            if (!project) {
+              core.setFailed(`Project '${owner}/${projectTitle}' was not found.`);
+              return;
+            }
+
+            const issueResult = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    id
+                    url
+                    projectItems(first: 100) {
+                      nodes {
+                        id
+                        project { id title }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { owner, repo, number: issueNumber });
+
+            const issue = issueResult.repository?.issue;
+            if (!issue) {
+              core.setFailed(`Issue #${issueNumber} was not found.`);
+              return;
+            }
+
+            const item = issue.projectItems.nodes.find(
+              i => i.project.id === project.id
+            );
+            if (!item) {
+              core.setFailed(`Issue #${issueNumber} is not in project '${projectTitle}'.`);
+              return;
+            }
+
+            const fieldsResult = await github.graphql(`
+              query($projectId: ID!) {
+                node(id: $projectId) {
+                  ... on ProjectV2 {
+                    fields(first: 100) {
+                      nodes {
+                        ... on ProjectV2SingleSelectField {
+                          id
+                          name
+                          options { id name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { projectId: project.id });
+
+            const statusField = fieldsResult.node.fields.nodes.find(
+              f => f?.name === 'Status'
+            );
+            if (!statusField) {
+              core.setFailed("Project field 'Status' was not found.");
+              return;
+            }
+
+            const option = statusField.options.find(o => o.name === targetStatus);
+            if (!option) {
+              core.setFailed(`Status option '${targetStatus}' was not found.`);
+              return;
+            }
+
+            await github.graphql(`
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { singleSelectOptionId: $optionId }
+                }) {
+                  projectV2Item { id }
+                }
+              }
+            `, {
+              projectId: project.id,
+              itemId: item.id,
+              fieldId: statusField.id,
+              optionId: option.id,
+            });
+
+            core.info(`Issue #${issueNumber}: Status -> ${targetStatus}`);
