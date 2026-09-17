@@ -140,6 +140,56 @@ export async function createTransaction(input: {
   ]);
 }
 
+/**
+ * An owned-account transfer is represented by two cleared, manual legs that
+ * share a group id. Keeping both legs as normal transactions makes account
+ * activity and reconciliation traceable, while finance calculations can
+ * exclude the `transfer` kind without guessing from descriptions.
+ */
+export async function createTransfer(input: {
+  fromAccountId: string;
+  toAccountId: string;
+  date: string;
+  amountCents: number;
+  description: string;
+}): Promise<void> {
+  await ensureSchema();
+  await requireActiveDistinctAccounts(input.fromAccountId, input.toAccountId);
+  const now = new Date().toISOString();
+  const groupId = crypto.randomUUID();
+  await db.batch(transferInsertStatements({ ...input, groupId, now }));
+}
+
+export async function updateTransfer(groupId: string, input: {
+  fromAccountId: string;
+  toAccountId: string;
+  date: string;
+  amountCents: number;
+  description: string;
+}): Promise<void> {
+  await ensureSchema();
+  await requireActiveDistinctAccounts(input.fromAccountId, input.toAccountId);
+  const legs = await transferLegs(groupId);
+  const now = new Date().toISOString();
+  await db.batch([
+    { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [legs.from.amountCents, now, legs.from.accountId] },
+    { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [legs.to.amountCents, now, legs.to.accountId] },
+    { sql: "DELETE FROM transactions WHERE transfer_group_id = ?", args: [groupId] },
+    ...transferInsertStatements({ ...input, groupId, now }),
+  ]);
+}
+
+export async function deleteTransfer(groupId: string): Promise<void> {
+  await ensureSchema();
+  const legs = await transferLegs(groupId);
+  const now = new Date().toISOString();
+  await db.batch([
+    { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [legs.from.amountCents, now, legs.from.accountId] },
+    { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [legs.to.amountCents, now, legs.to.accountId] },
+    { sql: "DELETE FROM transactions WHERE transfer_group_id = ?", args: [groupId] },
+  ]);
+}
+
 export async function updateTransaction(id: string, input: {
   accountId: string;
   date: string;
@@ -151,6 +201,7 @@ export async function updateTransaction(id: string, input: {
   const existing = await one("SELECT * FROM transactions WHERE id = ?", [id]);
   if (!existing) throw notFound("Transaction");
   if (existing.source !== "manual") throw conflict("Only manual transactions can be edited");
+  if (existing.kind === "transfer") throw conflict("Edit transfers as one linked transfer");
   const oldAmount = Number(existing.amount_cents);
   const newAmount = input.kind === "expense" ? -input.amountCents : input.amountCents;
   const oldAccountId = String(existing.account_id);
@@ -170,6 +221,7 @@ export async function deleteTransaction(id: string): Promise<void> {
   const existing = await one("SELECT * FROM transactions WHERE id = ?", [id]);
   if (!existing) throw notFound("Transaction");
   if (existing.source !== "manual") throw conflict("Only manual transactions can be deleted directly");
+  if (existing.kind === "transfer") throw conflict("Delete transfers as one linked transfer");
   await db.batch([
     {
       sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?",
@@ -385,6 +437,55 @@ function demoStateFromRow(row: Row | undefined): DemoDataState {
 async function one(sql: string, args: (string | number | null)[]): Promise<Row | null> {
   const result = await db.execute({ sql, args });
   return (result.rows[0] as Row | undefined) ?? null;
+}
+
+type TransferLeg = { id: string; accountId: string; amountCents: number };
+
+async function requireActiveDistinctAccounts(fromAccountId: string, toAccountId: string): Promise<void> {
+  if (fromAccountId === toAccountId) throw conflict("Choose two different active accounts");
+  const result = await db.execute({
+    sql: "SELECT id FROM accounts WHERE id IN (?, ?) AND is_active = 1",
+    args: [fromAccountId, toAccountId],
+  });
+  if (result.rows.length !== 2) throw conflict("Transfers require two active accounts");
+}
+
+async function transferLegs(groupId: string): Promise<{ from: TransferLeg; to: TransferLeg }> {
+  const result = await db.execute({
+    sql: `SELECT id, account_id, amount_cents FROM transactions
+      WHERE transfer_group_id = ? AND kind = 'transfer' AND source = 'manual' AND voided_at IS NULL`,
+    args: [groupId],
+  });
+  const legs = result.rows.map((row) => ({ id: String(row.id), accountId: String(row.account_id), amountCents: Number(row.amount_cents) }));
+  const from = legs.find((leg) => leg.amountCents < 0);
+  const to = legs.find((leg) => leg.amountCents > 0);
+  if (legs.length !== 2 || !from || !to || Math.abs(from.amountCents) !== to.amountCents) {
+    throw conflict("Transfer is incomplete or cannot be changed");
+  }
+  return { from, to };
+}
+
+function transferInsertStatements(input: {
+  fromAccountId: string;
+  toAccountId: string;
+  date: string;
+  amountCents: number;
+  description: string;
+  groupId: string;
+  now: string;
+}): { sql: string; args: (string | number | null)[] }[] {
+  const insert = (id: string, accountId: string, amountCents: number) => ({
+    sql: `INSERT INTO transactions
+      (id, account_id, date, amount_cents, currency, description, kind, status, source, transfer_group_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'EUR', ?, 'transfer', 'cleared', 'manual', ?, ?, ?)`,
+    args: [id, accountId, input.date, amountCents, input.description, input.groupId, input.now, input.now],
+  });
+  return [
+    insert(crypto.randomUUID(), input.fromAccountId, -input.amountCents),
+    insert(crypto.randomUUID(), input.toAccountId, input.amountCents),
+    { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [input.amountCents, input.now, input.fromAccountId] },
+    { sql: "UPDATE accounts SET balance_cents = balance_cents + ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [input.amountCents, input.now, input.toAccountId] },
+  ];
 }
 
 function mapAccount(row: Row): Account {

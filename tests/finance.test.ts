@@ -71,6 +71,20 @@ describe("calculateDashboard", () => {
     expect(result.spentThisMonthCents).toBe(38_000);
   });
 
+  it("does not turn a two-leg owned-account transfer into household income or spending", () => {
+    const result = calculateDashboard({
+      asOfDate: "2026-09-12",
+      accounts: [account(75_000), account(125_000, { id: "account-2", type: "savings" })],
+      plannedTransactions: [], reserves: [],
+      transactions: [
+        transaction(-25_000, { kind: "transfer", transferGroupId: "transfer-1" }),
+        transaction(25_000, { accountId: "account-2", kind: "transfer", transferGroupId: "transfer-1" }),
+      ],
+    });
+    expect(result.currentCashCents).toBe(200_000);
+    expect(result.spentThisMonthCents).toBe(0);
+  });
+
   it("ignores transactions outside the current month and after the as-of date", () => {
     const result = calculateDashboard({
       asOfDate: "2026-09-12", accounts: [account(0)], plannedTransactions: [], reserves: [],
