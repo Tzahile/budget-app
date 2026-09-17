@@ -17,7 +17,6 @@ jobs:
         with:
           github-token: ${{ secrets.PROJECT_TOKEN }}
           script: |
-            const owner = 'Tzahile';
             const projectTitle = 'BudgetApp';
             const body = context.payload.issue.body || '';
             const issueId = context.payload.issue.node_id;
@@ -34,8 +33,9 @@ jobs:
             };
 
             const result = await github.graphql(`
-              query($login: String!, $issueId: ID!) {
-                user(login: $login) {
+              query($issueId: ID!) {
+                viewer {
+                  login
                   projectsV2(first: 100) {
                     nodes {
                       id
@@ -60,11 +60,12 @@ jobs:
                   }
                 }
               }
-            `, { login: owner, issueId });
+            `, { issueId });
 
-            const project = result.user?.projectsV2?.nodes?.find(p => p.title === projectTitle);
+            const project = result.viewer?.projectsV2?.nodes?.find(p => p.title === projectTitle);
             if (!project) {
-              core.setFailed(`Project '${owner}/${projectTitle}' not found.`);
+              const names = result.viewer?.projectsV2?.nodes?.map(p => p.title).join(', ') || '(none)';
+              core.setFailed(`Project '${projectTitle}' not found for ${result.viewer?.login}. Visible projects: ${names}`);
               return;
             }
 
