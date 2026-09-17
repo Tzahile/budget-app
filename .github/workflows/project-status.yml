@@ -21,7 +21,7 @@ jobs:
           github-token: ${{ secrets.PROJECT_TOKEN }}
           script: |
             const repo = 'budget-app';
-            const projectTitle = 'BudgetApp';
+            const projectTitle = "@Tzahile's budgetApp project";
 
             const branch = context.eventName === 'create'
               ? context.payload.ref
