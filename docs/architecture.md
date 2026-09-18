@@ -17,9 +17,15 @@ All API mutations require both a same-origin `Origin` header and the custom
 `X-BudgetApp-Request` header. Inputs are length-bounded, type-checked and passed
 to SQLite as query parameters. Financial rows and secrets are not logged.
 
-Future import and sync adapters normalize into the canonical `Transaction`
-shape. `external_id`, deterministic `import_identity`, raw metadata, import
-history and transfer grouping already have schema support.
+CSV and future Open Banking adapters normalize into a source-neutral canonical
+ingestion input before writing transactions. The CSV endpoint accepts an
+explicit column mapping, validates every row before it writes anything, and
+keeps a short row-number audit marker only. The ingestion path creates an import
+run and imported transactions in one SQLite batch. A SHA-256 identity based on
+the source, account, and source external ID (or a stable transaction tuple)
+makes repeated imports idempotent; duplicate rows do not change balances.
+Pending imported rows are stored but do not affect current balances until a
+later sync/reconciliation flow clears them.
 
 Synthetic demo records carry durable row-level provenance. Seed and cleanup
 operations use SQLite batch claims so serialized concurrent requests remain

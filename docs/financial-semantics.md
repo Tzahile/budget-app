@@ -41,6 +41,10 @@ income, spending, planned cash flow, and projections.
   account balances but are excluded from household income and spending. A
   transfer is created, edited, or deleted as one atomic group; its legs cannot
   be independently changed or deleted.
+- Imports use the same canonical transaction model as future bank syncs. A
+  repeated source record is identified deterministically and is never applied a
+  second time. Imported rows retain a bounded source identifier and a minimal
+  audit marker, but never raw credentials or bank connection secrets.
 
 ## Planned items
 

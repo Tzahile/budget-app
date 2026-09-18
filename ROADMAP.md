@@ -1,10 +1,9 @@
 # Roadmap
 
-## Next: statement imports
+## Next: statement import UX
 
-- CSV/XLSX upload validation and configurable column mapping.
-- Deterministic import identity and duplicate preview.
-- Transactional import with import history and row-level errors.
+- CSV upload UI with saved/configurable column mappings and duplicate preview.
+- XLSX adapter feeding the existing canonical ingestion pipeline.
 - Explicit internal-transfer matching and manual transfer entry.
 
 ## Later

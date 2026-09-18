@@ -19,12 +19,13 @@ committed this month, what is protected, and what remains safe to spend.
 - explicit synthetic demo dataset
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
+- canonical transaction ingestion with a validated CSV adapter and idempotent import runs
 
 All persisted money uses integer EUR cents. See
 [`docs/financial-semantics.md`](docs/financial-semantics.md) for the exact
 calculation rules, [`docs/database-migrations.md`](docs/database-migrations.md)
-for schema-change conventions, and [`ROADMAP.md`](ROADMAP.md) for deferred
-imports, Open Banking and React Native work.
+for schema-change conventions, and [`ROADMAP.md`](ROADMAP.md) for remaining
+Open Banking and React Native work.
 
 ## Local checks
 
