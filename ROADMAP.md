@@ -12,7 +12,8 @@
 - Search and filters for larger transaction histories.
 - Export/backup tools.
 - Regulated EU Open Banking aggregator adapter feeding the same canonical
-  transaction pipeline. No direct bank credential handling.
+  transaction pipeline. Provider selection is gated on live-catalog plus
+  consent-test verification for BBVA Italy; no direct bank credential handling.
 - Android notification adapter.
 
 React Native is intentionally deferred until the web workflow is proven.

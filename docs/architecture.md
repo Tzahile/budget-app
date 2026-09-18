@@ -27,6 +27,15 @@ makes repeated imports idempotent; duplicate rows do not change balances.
 Pending imported rows are stored but do not affect current balances until a
 later sync/reconciliation flow clears them.
 
+Open Banking is read-only and adapter-based: provider-hosted consent keeps bank
+credentials out of BudgetApp, provider secrets remain server-side, and a
+provider adapter feeds the same canonical ingestion path as CSV. Provider
+support, especially BBVA Italy, is a live-catalog and consent-test gate rather
+than an assumption based on country coverage. See
+[`open-banking-architecture.md`](open-banking-architecture.md) for the
+provider-neutral interface, consent and sync state models, and evaluation
+criteria.
+
 Synthetic demo records carry durable row-level provenance. Seed and cleanup
 operations use SQLite batch claims so serialized concurrent requests remain
 idempotent. Cleanup proceeds only when every stored entity row is demo-marked;
