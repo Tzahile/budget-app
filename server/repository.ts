@@ -25,6 +25,12 @@ import {
 } from "./planned-operations.ts";
 import { reconcileAccountStatements } from "./reconciliation-operations.ts";
 import { createReserveStatement, updateReserveStatement } from "./reserve-operations.ts";
+import {
+  ingestionWritePlan,
+  prepareCanonicalTransactions,
+  type CanonicalTransactionInput,
+  type IngestionSource,
+} from "./ingestion.ts";
 
 type Row = Record<string, unknown>;
 
@@ -188,6 +194,39 @@ export async function deleteTransfer(groupId: string): Promise<void> {
     { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [legs.to.amountCents, now, legs.to.accountId] },
     { sql: "DELETE FROM transactions WHERE transfer_group_id = ?", args: [groupId] },
   ]);
+}
+
+/**
+ * Persist normalized records from any adapter through one transactional path.
+ * Repeating the same source records is a no-op for balances and transactions.
+ */
+export async function ingestTransactions(input: {
+  accountId: string;
+  filename: string;
+  source: IngestionSource;
+  transactions: readonly CanonicalTransactionInput[];
+}): Promise<{ importId: string; importedCount: number; duplicateCount: number }> {
+  await ensureSchema();
+  if (!input.transactions.length) throw Object.assign(new Error("No valid transactions to import"), { status: 400 });
+  const prepared = await prepareCanonicalTransactions({
+    source: input.source, accountId: input.accountId, transactions: input.transactions,
+  });
+  const identities = prepared.map((transaction) => transaction.importIdentity);
+  const existing = new Set<string>();
+  for (const values of chunk(identities, 500)) {
+    const result = await db.execute({
+      sql: `SELECT import_identity FROM transactions WHERE import_identity IN (${values.map(() => "?").join(", ")})`,
+      args: values,
+    });
+    for (const row of result.rows) existing.add(String((row as Row).import_identity));
+  }
+  const importId = crypto.randomUUID();
+  const plan = ingestionWritePlan({
+    importId, accountId: input.accountId, filename: input.filename, source: input.source,
+    transactions: prepared, duplicateIdentities: existing, now: new Date().toISOString(),
+  });
+  await db.batch(plan.statements);
+  return { importId, importedCount: plan.importedCount, duplicateCount: plan.duplicateCount };
 }
 
 export async function updateTransaction(id: string, input: {
@@ -590,6 +629,12 @@ function invalidReserveLink(): Error {
 
 function requireChanged(rowsAffected: number, entity: string): void {
   if (!rowsAffected) throw notFound(entity);
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
 }
 
 function notFound(entity: string): Error {

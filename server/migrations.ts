@@ -174,6 +174,15 @@ export const migrations: readonly Migration[] = [
         ON reserves(linked_planned_transaction_id) WHERE linked_planned_transaction_id IS NOT NULL`,
     ],
   },
+  {
+    version: 8,
+    name: "canonical ingestion runs",
+    statements: [
+      "ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'csv' CHECK (source IN ('csv', 'open_banking'))",
+      "ALTER TABLE imports ADD COLUMN account_id TEXT REFERENCES accounts(id) ON DELETE RESTRICT",
+      "CREATE INDEX imports_account_created_idx ON imports(account_id, created_at DESC)",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

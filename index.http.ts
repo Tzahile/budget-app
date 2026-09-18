@@ -19,6 +19,7 @@ import {
   deleteTransaction,
   deactivatePlanned,
   getAppData,
+  ingestTransactions,
   reconcileAccount,
   seedDemoData,
   updateAccount,
@@ -29,6 +30,7 @@ import {
   undoPlannedCompletion,
   deleteTransfer,
 } from "./server/repository.ts";
+import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import {
   booleanField,
@@ -160,6 +162,19 @@ app.delete("/api/transfers/:id", async (c) => {
   return c.body(null, 204);
 });
 
+app.post("/api/imports/csv", async (c) => {
+  const body = await readBody(c.req.raw);
+  const accountId = safeId(stringField(body, "accountId", 64));
+  const csv = exactStringField(body, "csv", 500_000);
+  const mapping = csvMapping(body.mapping);
+  const parsed = parseCsvTransactions(csv, mapping);
+  if (parsed.errors.length) return c.json({ ok: false, errors: parsed.errors }, 422);
+  const result = await ingestTransactions({
+    accountId, filename: stringField(body, "filename", 160), source: "csv", transactions: parsed.transactions,
+  });
+  return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+});
+
 app.post("/api/planned", async (c) => {
   const body = await readBody(c.req.raw);
   await createPlanned(plannedInput(body));
@@ -266,6 +281,17 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
 
 function safeId(value: string): string {
   return uuidField(value);
+}
+
+function csvMapping(value: unknown): CsvColumnMapping {
+  const mapping = objectBody(value);
+  return {
+    date: stringField(mapping, "date", 100),
+    amount: stringField(mapping, "amount", 100),
+    description: stringField(mapping, "description", 100),
+    externalId: optionalString(mapping, "externalId", 100) ?? undefined,
+    status: optionalString(mapping, "status", 100) ?? undefined,
+  };
 }
 
 function plannedInput(body: Record<string, unknown>) {
