@@ -13,9 +13,20 @@ Val Town's val-scoped SQLite database is the only persistence layer. The app
 uses Val Town OAuth, then permits only the val owner plus usernames explicitly
 listed in the `BUDGET_APP_ALLOWED_USERS` Val Town environment variable.
 
-All API mutations require both a same-origin `Origin` header and the custom
-`X-BudgetApp-Request` header. Inputs are length-bounded, type-checked and passed
-to SQLite as query parameters. Financial rows and secrets are not logged.
+All financial API routes require a Val Town OAuth session and an allowlisted
+username. API mutations also require both a same-origin `Origin` header and the
+custom `X-BudgetApp-Request` header, preventing a third-party site from using a
+browser's session cookie to change data. Mutation bodies must be JSON and are
+streamed through a 32 KB hard byte limit, including requests without a reliable
+`Content-Length`. Inputs are type-checked and passed to SQLite as query
+parameters. Financial rows, request bodies, secrets, and underlying server
+error text are not logged.
+
+Every response is marked `Cache-Control: no-store`; the app also sends a
+restrictive CSP, `frame-ancestors 'none'`, `nosniff`, same-origin referrer and
+opener policies, and disables unused browser permissions. The Val Town OAuth
+login/logout routes are intentionally handled by its middleware rather than the
+application API.
 
 CSV and future Open Banking adapters normalize into a source-neutral canonical
 ingestion input before writing transactions. The CSV endpoint accepts an

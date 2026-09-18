@@ -31,6 +31,7 @@ import {
   deleteTransfer,
 } from "./server/repository.ts";
 import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import {
   booleanField,
@@ -48,6 +49,11 @@ import {
 } from "./server/validation.ts";
 
 const app = new Hono();
+
+app.use("*", async (c, next) => {
+  await next();
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) c.header(name, value);
+});
 
 app.get("/", (c) => c.html(Root()));
 app.get("/__immutable/*", (c) => serveImmutableFile(c.req.path));
@@ -67,12 +73,8 @@ app.use("/api/*", async (c, next) => {
   const session = await getOAuthUserData(c.req.raw);
   if (!session?.user) return c.json({ error: "Authentication required" }, 401);
   if (!isAuthorized(session.user.username)) return c.json({ error: "This Val Town account is not allowed" }, 403);
-  if (!["GET", "HEAD", "OPTIONS"].includes(c.req.method)) {
-    const origin = c.req.header("Origin");
-    const expectedOrigin = new URL(c.req.url).origin;
-    if (origin !== expectedOrigin || c.req.header("X-BudgetApp-Request") !== "1") {
-      return c.json({ error: "Invalid request origin" }, 403);
-    }
+  if (!isTrustedMutationRequest(c.req.raw)) {
+    return c.json({ error: "Invalid request origin" }, 403);
   }
   await next();
 });
@@ -259,7 +261,9 @@ app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
   const status = Number((error as Error & { status?: number }).status) ||
     (/constraint/i.test(error.message) ? 409 : error instanceof SyntaxError ? 400 : 500);
-  if (status >= 500) console.error("BudgetApp request failed", error.name, error.message);
+  // Error text can contain database/provider context. Keep production logs useful
+  // for operational triage without turning them into a financial-data sink.
+  if (status >= 500) console.error("BudgetApp request failed", error.name);
   return c.json({ error: status >= 500 ? "Unexpected server error" : error.message }, status as 400);
 });
 
@@ -274,9 +278,7 @@ function isAuthorized(username: string | null): boolean {
 }
 
 async function readBody(request: Request): Promise<Record<string, unknown>> {
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > 32_000) throw Object.assign(new Error("Request body is too large"), { status: 413 });
-  return objectBody(await request.json());
+  return readJsonObject(request);
 }
 
 function safeId(value: string): string {
