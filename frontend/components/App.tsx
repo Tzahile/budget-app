@@ -211,6 +211,24 @@ function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { dat
           </div>
         </section>
       </div>
+      <section className="mt-7 rounded-2xl border border-stone-200 bg-white p-5">
+        <SectionTitle title="Six-month cash-flow projection" subtitle="Deterministic planned income, commitments, and reserve protection. It is not advisory guidance." />
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {d.projectionMonths.map((month) => (
+            <div key={month.monthStart} className="rounded-xl border border-stone-100 bg-stone-50 p-4">
+              <p className="font-semibold">{prettyMonth(month.monthStart)}</p>
+              <div className="mt-3 space-y-2 text-sm">
+                <SummaryRow label="Opening cash" cents={month.openingCashCents} />
+                <SummaryRow label="Expected income" cents={month.expectedIncomeCents} />
+                <SummaryRow label="Committed expenses" cents={-month.committedExpensesCents} />
+                {month.monthlyGoalContributionsCents > 0 && <SummaryRow label="Goal protection added" cents={-month.monthlyGoalContributionsCents} />}
+                <div className="border-t border-stone-200 pt-2"><SummaryRow label="Projected month-end" cents={month.projectedMonthEndCents} strong /></div>
+                <SummaryRow label="Available after reserves" cents={month.availableToSpendCents} strong />
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
@@ -356,5 +374,6 @@ function money(cents: number): string { return new Intl.NumberFormat("en-IE", { 
 function euros(cents: number): string { return `${cents < 0 ? "-" : ""}${Math.floor(Math.abs(cents) / 100)}.${String(Math.abs(cents) % 100).padStart(2, "0")}`; }
 function today(): string { return householdDate(); }
 function prettyDate(date: string): string { return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }); }
+function prettyMonth(date: string): string { return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" }); }
 function messageOf(error: unknown): string { return error instanceof Error ? error.message : "Something went wrong"; }
 function confirmed(message: string): boolean { return window.confirm(message); }

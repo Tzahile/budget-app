@@ -108,6 +108,21 @@ safe to spend       = projected month-end - protected reserves
 
 Safe to spend may be negative; it is not clamped to zero.
 
+## Multi-month projection
+
+The dashboard also projects the current partial month plus the following five
+calendar months. Each month starts with the prior projected month-end cash,
+then applies only unpaid planned income and expenses due in that month. Past
+cleared transactions are already represented by current account balances and
+are never applied again.
+
+The projection simulates the monthly contributions needed to meet active goal
+deadlines, and shows the resulting protected amount separately from projected
+cash. A linked one-off reserve is consumed in the simulation when its planned
+expense occurs, so it does not remain protected in subsequent forecast months.
+This is a deterministic cash-flow forecast, not an AI recommendation or a
+promise that the displayed available amount is safe to spend.
+
 An active target-date reserve may be linked one-to-one to an active, one-off
 planned expense. The planned expense remains fully included in projected
 month-end cash, because paying it will reduce an account balance. When that

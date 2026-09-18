@@ -14,7 +14,7 @@ committed this month, what is protected, and what remains safe to spend.
 - recurring and one-off planned income/expenses
 - mark planned items paid/received, then safely undo or correct the latest completion
 - protected reserves and target-date sinking funds linked safely to one-off planned expenses
-- projected month-end and safe-to-spend dashboard
+- projected month-end, safe-to-spend, and six-month deterministic cash-flow dashboard
 - responsive mobile/desktop React UI
 - explicit synthetic demo dataset
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addRecurrence, assertDateOnly, calculateDashboard, householdDate, occurrencesBetween, requiredGoalContributionCents } from "../shared/finance.ts";
+import { addRecurrence, assertDateOnly, calculateCashFlowProjection, calculateDashboard, householdDate, occurrencesBetween, requiredGoalContributionCents } from "../shared/finance.ts";
 import type { Account, PlannedTransaction, Reserve, Transaction } from "../shared/types.ts";
 
 const now = "2026-09-12T10:00:00.000Z";
@@ -266,6 +266,81 @@ describe("reserve goals", () => {
       reserve(25_000, { targetAmountCents: 20_000, targetDate: "2026-11-30" }),
       "2026-09-12",
     )).toBe(0);
+  });
+});
+
+describe("multi-month cash-flow projection", () => {
+  it("carries each projected month-end into the next opening balance without replaying cleared transactions", () => {
+    const projection = calculateCashFlowProjection({
+      asOfDate: "2026-09-12",
+      accounts: [account(100_000)],
+      plannedTransactions: [
+        planned({ description: "Salary", kind: "income", amountCents: 200_000, nextDate: "2026-09-25" }),
+        planned({ description: "Rent", amountCents: 80_000, nextDate: "2026-09-15" }),
+      ],
+      reserves: [],
+      months: 2,
+    });
+
+    expect(projection).toHaveLength(2);
+    expect(projection[0]).toMatchObject({
+      monthStart: "2026-09-01", openingCashCents: 100_000,
+      expectedIncomeCents: 200_000, committedExpensesCents: 80_000,
+      projectedMonthEndCents: 220_000,
+    });
+    expect(projection[1]).toMatchObject({
+      monthStart: "2026-10-01", openingCashCents: 220_000,
+      expectedIncomeCents: 200_000, committedExpensesCents: 80_000,
+      projectedMonthEndCents: 340_000,
+    });
+  });
+
+  it("keeps overdue commitments in the current month only", () => {
+    const projection = calculateCashFlowProjection({
+      asOfDate: "2026-09-12", accounts: [account(100_000)], reserves: [], months: 2,
+      plannedTransactions: [planned({ recurrence: "once", nextDate: "2026-09-05", amountCents: 25_000 })],
+    });
+
+    expect(projection[0]?.committedExpensesCents).toBe(25_000);
+    expect(projection[0]?.upcoming[0]?.date).toBe("2026-09-05");
+    expect(projection[1]?.committedExpensesCents).toBe(0);
+  });
+
+  it("spreads target-date protection across forecast months and consumes a linked goal after its expense", () => {
+    const car = planned({ id: "car", recurrence: "once", nextDate: "2026-11-20", amountCents: 600_000 });
+    const projection = calculateCashFlowProjection({
+      asOfDate: "2026-09-12", accounts: [account(1_000_000)], plannedTransactions: [car], months: 4,
+      reserves: [reserve(0, {
+        name: "Car", targetAmountCents: 600_000, targetDate: "2026-11-30", linkedPlannedTransactionId: car.id,
+      })],
+    });
+
+    expect(projection.map((month) => month.monthlyGoalContributionsCents)).toEqual([200_000, 200_000, 200_000, 0]);
+    expect(projection[2]).toMatchObject({
+      committedExpensesCents: 600_000,
+      linkedGoalCoverageCents: 600_000,
+      protectedReservesCents: 0,
+      projectedMonthEndCents: 400_000,
+      availableToSpendCents: 400_000,
+    });
+    expect(projection[3]?.protectedReservesCents).toBe(0);
+  });
+
+  it("exposes the same first-month forecast through the dashboard", () => {
+    const dashboard = calculateDashboard({
+      asOfDate: "2026-09-12", accounts: [account(100_000)], transactions: [], reserves: [],
+      plannedTransactions: [planned({ amountCents: 30_000 })],
+    });
+    expect(dashboard.projectionMonths[0]).toMatchObject({
+      projectedMonthEndCents: dashboard.projectedMonthEndCents,
+      availableToSpendCents: dashboard.safeToSpendCents,
+    });
+  });
+
+  it("rejects an invalid projection horizon", () => {
+    expect(() => calculateCashFlowProjection({
+      asOfDate: "2026-09-12", accounts: [], plannedTransactions: [], reserves: [], months: 0,
+    })).toThrow("Projection months");
   });
 });
 

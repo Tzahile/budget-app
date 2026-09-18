@@ -1,5 +1,6 @@
 import type {
   Account,
+  CashFlowProjectionMonth,
   DashboardSummary,
   PlannedOccurrence,
   PlannedTransaction,
@@ -141,6 +142,7 @@ export function calculateDashboard(input: {
   const protectedReservesCents = fundedReservesCents + requiredGoalContributionsCents - linkedGoalCoverageCents;
   const projectedMonthEndCents = currentCashCents + remainingIncomeCents - remainingExpensesCents;
   const safeToSpendCents = projectedMonthEndCents - protectedReservesCents;
+  const projectionMonths = calculateCashFlowProjection(input);
 
   return {
     asOfDate: input.asOfDate,
@@ -157,7 +159,104 @@ export function calculateDashboard(input: {
     projectedMonthEndCents,
     safeToSpendCents,
     upcoming,
+    projectionMonths,
   };
+}
+
+/**
+ * Projects the current (partial) household month plus the next five calendar
+ * months. It only models deterministic planned cash flow and reserve goals;
+ * it deliberately does not make an advisory "safe to spend" recommendation.
+ */
+export function calculateCashFlowProjection(input: {
+  asOfDate: string;
+  accounts: Account[];
+  plannedTransactions: PlannedTransaction[];
+  reserves: Reserve[];
+  months?: number;
+}): CashFlowProjectionMonth[] {
+  assertDateOnly(input.asOfDate);
+  const months = input.months ?? 6;
+  if (!Number.isInteger(months) || months < 1 || months > 24) {
+    throw new Error("Projection months must be an integer between 1 and 24");
+  }
+
+  let openingCashCents = sum(input.accounts.filter((account) => account.isActive), (account) => account.balanceCents);
+  const virtualReserves = input.reserves
+    .filter((reserve) => reserve.isActive)
+    .map((reserve) => ({ ...reserve }));
+  const linkedReserves = new Map(virtualReserves
+    .filter((reserve) => reserve.targetAmountCents != null && reserve.linkedPlannedTransactionId != null)
+    .map((reserve) => [reserve.linkedPlannedTransactionId!, reserve]));
+  const eligiblePlannedIds = new Set(input.plannedTransactions
+    .filter((item) => item.isActive && item.kind === "expense" && item.recurrence === "once")
+    .map((item) => item.id));
+  const result: CashFlowProjectionMonth[] = [];
+
+  for (let index = 0; index < months; index++) {
+    const monthStart = projectionMonthStart(input.asOfDate, index);
+    const { end: monthEnd } = monthBounds(monthStart);
+    const occurrenceStart = index === 0 ? input.asOfDate : monthStart;
+    const rawUpcoming = input.plannedTransactions
+      .flatMap((item) => occurrencesBetween(item, index === 0 ? item.nextDate : occurrenceStart, monthEnd))
+      .sort((a, b) => a.date.localeCompare(b.date) || a.description.localeCompare(b.description));
+    const monthlyGoalContributionsCents = sum(
+      virtualReserves,
+      (reserve) => requiredGoalContributionCents(reserve, occurrenceStart),
+    );
+    for (const reserve of virtualReserves) {
+      const contribution = requiredGoalContributionCents(reserve, occurrenceStart);
+      if (contribution === 0) continue;
+      reserve.fundedAmountCents += contribution;
+      reserve.contributionMonth = occurrenceStart.slice(0, 7);
+      reserve.contributedThisMonthCents = contribution;
+    }
+
+    const upcoming = rawUpcoming.map((occurrence) => {
+      const reserve = occurrence.kind === "expense" && eligiblePlannedIds.has(occurrence.plannedTransactionId)
+        ? linkedReserves.get(occurrence.plannedTransactionId)
+        : undefined;
+      if (!reserve || !reserve.isActive) return occurrence;
+      return {
+        ...occurrence,
+        linkedReserveId: reserve.id,
+        linkedReserveName: reserve.name,
+        linkedGoalCoverageCents: Math.min(occurrence.amountCents, reserve.fundedAmountCents),
+      };
+    });
+    const expectedIncomeCents = sum(upcoming.filter((item) => item.kind === "income"), (item) => item.amountCents);
+    const committedExpensesCents = sum(upcoming.filter((item) => item.kind === "expense"), (item) => item.amountCents);
+    const linkedGoalCoverageCents = sum(upcoming, (item) => item.linkedGoalCoverageCents);
+    const grossProtectedCents = sum(virtualReserves.filter((reserve) => reserve.isActive), (reserve) => reserve.fundedAmountCents);
+    const protectedReservesCents = grossProtectedCents - linkedGoalCoverageCents;
+    const projectedMonthEndCents = openingCashCents + expectedIncomeCents - committedExpensesCents;
+    result.push({
+      monthStart,
+      monthEnd,
+      openingCashCents,
+      expectedIncomeCents,
+      committedExpensesCents,
+      monthlyGoalContributionsCents,
+      protectedReservesCents,
+      linkedGoalCoverageCents,
+      projectedMonthEndCents,
+      availableToSpendCents: projectedMonthEndCents - protectedReservesCents,
+      upcoming,
+    });
+
+    // A linked one-off goal is consumed in the simulated future once its
+    // planned expense happens. This prevents its protected balance from being
+    // deducted again in later forecast months.
+    for (const occurrence of upcoming) {
+      if (!occurrence.linkedReserveId || occurrence.linkedGoalCoverageCents === 0) continue;
+      const reserve = linkedReserves.get(occurrence.plannedTransactionId);
+      if (!reserve) continue;
+      reserve.fundedAmountCents -= occurrence.linkedGoalCoverageCents;
+      reserve.isActive = false;
+    }
+    openingCashCents = projectedMonthEndCents;
+  }
+  return result;
 }
 
 export function requiredGoalContributionCents(
@@ -190,4 +289,9 @@ function sum<T>(items: T[], value: (item: T) => number): number {
 
 function formatUtcDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+function projectionMonthStart(asOfDate: string, offset: number): string {
+  const [year, month] = asOfDate.split("-").map(Number);
+  return formatUtcDate(new Date(Date.UTC(year, month - 1 + offset, 1)));
 }
