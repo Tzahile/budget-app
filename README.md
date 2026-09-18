@@ -10,7 +10,7 @@ committed this month, what is protected, and what remains safe to spend.
 
 - Val Town OAuth with owner/family allowlisting
 - accounts and current balances
-- manual income and expenses with edit/delete balance reversal
+- manual income, expenses, and owned-account transfers with edit/delete balance reversal
 - recurring and one-off planned income/expenses
 - mark planned items paid/received, then safely undo or correct the latest completion
 - protected reserves and target-date sinking funds linked safely to one-off planned expenses

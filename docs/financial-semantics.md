@@ -35,9 +35,12 @@ income, spending, planned cash flow, and projections.
   below zero.
 - Pending transactions do not count as spent. They also do not change a current
   balance until cleared.
-- Transfers use two linked transaction legs with a shared transfer group. They
-  change individual account balances but are excluded from household income and
-  spending. The model supports this now; the transfer-entry UI is deferred.
+- Transfers between owned active accounts use two linked, cleared manual
+  transaction legs with a shared transfer group: a negative leg in the source
+  account and an equal positive leg in the destination. They change individual
+  account balances but are excluded from household income and spending. A
+  transfer is created, edited, or deleted as one atomic group; its legs cannot
+  be independently changed or deleted.
 
 ## Planned items
 

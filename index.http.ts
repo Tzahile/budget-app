@@ -12,6 +12,7 @@ import {
   createPlanned,
   createReserve,
   createTransaction,
+  createTransfer,
   deleteAccount,
   deletePlanned,
   deleteReserve,
@@ -24,7 +25,9 @@ import {
   updatePlanned,
   updateReserve,
   updateTransaction,
+  updateTransfer,
   undoPlannedCompletion,
+  deleteTransfer,
 } from "./server/repository.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import {
@@ -139,6 +142,21 @@ app.put("/api/transactions/:id", async (c) => {
 
 app.delete("/api/transactions/:id", async (c) => {
   await deleteTransaction(safeId(c.req.param("id")));
+  return c.body(null, 204);
+});
+
+app.post("/api/transfers", async (c) => {
+  await createTransfer(transferInput(await readBody(c.req.raw)));
+  return c.json({ ok: true }, 201);
+});
+
+app.put("/api/transfers/:id", async (c) => {
+  await updateTransfer(safeId(c.req.param("id")), transferInput(await readBody(c.req.raw)));
+  return c.json({ ok: true });
+});
+
+app.delete("/api/transfers/:id", async (c) => {
+  await deleteTransfer(safeId(c.req.param("id")));
   return c.body(null, 204);
 });
 
@@ -272,6 +290,19 @@ function plannedInput(body: Record<string, unknown>) {
     nextDate,
     endDate,
     isActive: booleanField(body, "isActive", true),
+  };
+}
+
+function transferInput(body: Record<string, unknown>) {
+  const fromAccountId = safeId(stringField(body, "fromAccountId", 64));
+  const toAccountId = safeId(stringField(body, "toAccountId", 64));
+  if (fromAccountId === toAccountId) throw new ValidationError("Choose two different accounts");
+  return {
+    fromAccountId,
+    toAccountId,
+    date: dateField(body, "date"),
+    amountCents: centsField(body),
+    description: stringField(body, "description", 160),
   };
 }
 
