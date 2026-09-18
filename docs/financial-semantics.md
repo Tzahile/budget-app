@@ -103,17 +103,21 @@ month-start baseline and preserves funding already added that month. Removing a
 goal clears its monthly progress. A goal due this month or overdue requires its
 full remaining shortfall. Completed, overfunded, inactive, and non-goal reserves
 require no contribution. The amount still required this month is protected from
-safe-to-spend, but it does not change the account balance until the user updates
+available-to-spend, but it does not change the account balance until the user updates
 the funded amount.
 
 ```text
 projected month-end = current cash + remaining expected income - remaining committed expenses
 gross protection    = funded active reserves + required goal contributions this month
 protected reserves  = gross protection - linked coverage due this month
-safe to spend       = projected month-end - protected reserves
+available to spend  = projected month-end - protected reserves
 ```
 
-Safe to spend may be negative; it is not clamped to zero.
+Available to spend may be negative; it is not clamped to zero. It is a
+deterministic accounting result, not a recommendation that the amount is safe
+to spend. Advisory safe-to-spend guidance is a separate, optional future
+feature: it may account for uncertainty, buffers, income stability, and other
+judgment, but must never alter this calculation or any accounting data.
 
 ## Multi-month projection
 
@@ -134,7 +138,7 @@ An active target-date reserve may be linked one-to-one to an active, one-off
 planned expense. The planned expense remains fully included in projected
 month-end cash, because paying it will reduce an account balance. When that
 expense is due this month or overdue, its linked goal protection overlaps the
-expense rather than creating a second safe-to-spend deduction:
+expense rather than creating a second available-to-spend deduction:
 
 ```text
 linked coverage     = min(planned expense, funded reserve + contribution still required)
