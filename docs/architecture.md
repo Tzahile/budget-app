@@ -32,9 +32,13 @@ CSV and future Open Banking adapters normalize into a source-neutral canonical
 ingestion input before writing transactions. The CSV endpoint accepts an
 explicit column mapping, validates every row before it writes anything, and
 keeps a short row-number audit marker only. The ingestion path creates an import
-run and imported transactions in one SQLite batch. A SHA-256 identity based on
-the source, account, and source external ID (or a stable transaction tuple)
-makes repeated imports idempotent; duplicate rows do not change balances.
+run and imported transactions in one SQLite batch. The identity hierarchy is
+account-scoped and source-agnostic: a trusted external ID proves a duplicate
+across CSV and Open Banking adapters, while a conservatively normalized
+date/amount/description fingerprint is only a collision signal. Matching
+fallback fingerprints are reported as ambiguous and block the import rather
+than silently dropping a potentially legitimate similar transaction. Only
+trusted-ID duplicates are skipped without changing balances.
 Pending imported rows are stored but do not affect current balances until a
 later sync/reconciliation flow clears them.
 
