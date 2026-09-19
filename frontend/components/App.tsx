@@ -178,10 +178,10 @@ function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { dat
         <div className="flex gap-2"><Button secondary onClick={onAddPlanned}>Plan ahead</Button><Button onClick={onAddTransaction}>Add transaction</Button></div>
       </div>
 
-      <section className={`mt-7 overflow-hidden rounded-3xl p-6 text-white shadow-lg sm:p-8 ${d.safeToSpendCents < 0 ? "bg-red-900" : "bg-green-950"}`}>
-        <p className="text-sm font-medium uppercase tracking-widest text-green-100">Safe to spend</p>
-        <p className="mt-3 text-5xl font-semibold tracking-tight sm:text-6xl">{money(d.safeToSpendCents)}</p>
-        <p className="mt-4 max-w-2xl text-sm leading-relaxed text-green-100">Cash now, plus expected income, minus unpaid commitments and protected reserves through {prettyDate(d.monthEnd)}.</p>
+      <section className={`mt-7 overflow-hidden rounded-3xl p-6 text-white shadow-lg sm:p-8 ${d.availableToSpendCents < 0 ? "bg-red-900" : "bg-green-950"}`}>
+        <p className="text-sm font-medium uppercase tracking-widest text-green-100">Available to spend</p>
+        <p className="mt-3 text-5xl font-semibold tracking-tight sm:text-6xl">{money(d.availableToSpendCents)}</p>
+        <p className="mt-4 max-w-2xl text-sm leading-relaxed text-green-100">Deterministic: cash now, plus expected income, minus unpaid commitments and protected reserves through {prettyDate(d.monthEnd)}. This is not spending advice.</p>
       </section>
 
       <section className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -211,7 +211,7 @@ function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { dat
             <SummaryRow label="Already protected" cents={-d.fundedReservesCents} />
             {d.requiredGoalContributionsCents > 0 && <SummaryRow label="Still to protect for goals this month" cents={-d.requiredGoalContributionsCents} />}
             {d.linkedGoalCoverageCents > 0 && <SummaryRow label="Already counted in planned expenses" cents={d.linkedGoalCoverageCents} />}
-            <div className="border-t border-stone-200 pt-4"><SummaryRow label="Available after reserves" cents={d.safeToSpendCents} strong /></div>
+            <div className="border-t border-stone-200 pt-4"><SummaryRow label="Available to spend" cents={d.availableToSpendCents} strong /></div>
           </div>
         </section>
       </div>

@@ -141,7 +141,9 @@ export function calculateDashboard(input: {
   const linkedGoalCoverageCents = sum(upcoming, (occurrence) => occurrence.linkedGoalCoverageCents);
   const protectedReservesCents = fundedReservesCents + requiredGoalContributionsCents - linkedGoalCoverageCents;
   const projectedMonthEndCents = currentCashCents + remainingIncomeCents - remainingExpensesCents;
-  const safeToSpendCents = projectedMonthEndCents - protectedReservesCents;
+  // This intentionally stays separate from any future advisory safe-spending
+  // recommendation. It is only the deterministic accounting result.
+  const availableToSpendCents = projectedMonthEndCents - protectedReservesCents;
   const projectionMonths = calculateCashFlowProjection(input);
 
   return {
@@ -157,7 +159,7 @@ export function calculateDashboard(input: {
     linkedGoalCoverageCents,
     protectedReservesCents,
     projectedMonthEndCents,
-    safeToSpendCents,
+    availableToSpendCents,
     upcoming,
     projectionMonths,
   };

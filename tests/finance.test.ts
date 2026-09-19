@@ -43,7 +43,7 @@ describe("calculateDashboard", () => {
     expect(result.projectedMonthEndCents).toBe(471_900);
     expect(result.fundedReservesCents).toBe(100_000);
     expect(result.requiredGoalContributionsCents).toBe(0);
-    expect(result.safeToSpendCents).toBe(371_900);
+    expect(result.availableToSpendCents).toBe(371_900);
   });
 
   it("excludes inactive accounts and reserves", () => {
@@ -55,7 +55,7 @@ describe("calculateDashboard", () => {
     });
     expect(result.currentCashCents).toBe(100_000);
     expect(result.protectedReservesCents).toBe(20_000);
-    expect(result.safeToSpendCents).toBe(80_000);
+    expect(result.availableToSpendCents).toBe(80_000);
   });
 
   it("nets refunds against spending and excludes transfers", () => {
@@ -93,12 +93,12 @@ describe("calculateDashboard", () => {
     expect(result.spentThisMonthCents).toBe(0);
   });
 
-  it("can produce a negative safe-to-spend value", () => {
+  it("can produce a negative deterministic available-to-spend value", () => {
     const result = calculateDashboard({
       asOfDate: "2026-09-12", accounts: [account(10_000)], transactions: [],
       plannedTransactions: [planned({ amountCents: 30_000 })], reserves: [reserve(5_000)],
     });
-    expect(result.safeToSpendCents).toBe(-25_000);
+    expect(result.availableToSpendCents).toBe(-25_000);
   });
 
   it("keeps overdue unpaid occurrences in committed cash flow", () => {
@@ -129,7 +129,7 @@ describe("calculateDashboard", () => {
     expect(result.projectedMonthEndCents).toBe(400_000);
     expect(result.linkedGoalCoverageCents).toBe(600_000);
     expect(result.protectedReservesCents).toBe(0);
-    expect(result.safeToSpendCents).toBe(400_000);
+    expect(result.availableToSpendCents).toBe(400_000);
     expect(result.upcoming[0]).toMatchObject({
       linkedReserveName: "New car",
       linkedGoalCoverageCents: 600_000,
@@ -153,7 +153,7 @@ describe("calculateDashboard", () => {
     expect(result.requiredGoalContributionsCents).toBe(100_000);
     expect(result.linkedGoalCoverageCents).toBe(300_000);
     expect(result.protectedReservesCents).toBe(0);
-    expect(result.safeToSpendCents).toBe(400_000);
+    expect(result.availableToSpendCents).toBe(400_000);
   });
 
   it("leaves unlinked, inactive, missing, and recurring associations unchanged", () => {
@@ -192,7 +192,7 @@ describe("calculateDashboard", () => {
     });
 
     expect(result.linkedGoalCoverageCents).toBe(25_000);
-    expect(result.safeToSpendCents).toBe(40_000);
+    expect(result.availableToSpendCents).toBe(40_000);
   });
 });
 
@@ -207,7 +207,7 @@ describe("reserve goals", () => {
     expect(requiredGoalContributionCents(goal, "2026-09-12")).toBe(200_000);
     expect(result.fundedReservesCents).toBe(0);
     expect(result.requiredGoalContributionsCents).toBe(200_000);
-    expect(result.safeToSpendCents).toBe(500_000);
+    expect(result.availableToSpendCents).toBe(500_000);
   });
 
   it("does not require September twice after its contribution is funded and rolls forward in October", () => {
@@ -232,7 +232,7 @@ describe("reserve goals", () => {
     expect(result.fundedReservesCents).toBe(100_000);
     expect(result.requiredGoalContributionsCents).toBe(166_667);
     expect(result.protectedReservesCents).toBe(266_667);
-    expect(result.safeToSpendCents).toBe(433_333);
+    expect(result.availableToSpendCents).toBe(433_333);
     expect(requiredGoalContributionCents(
       reserve(0, { targetAmountCents: 100, targetDate: "2026-11-30" }),
       "2026-09-12",
@@ -347,7 +347,7 @@ describe("multi-month cash-flow projection", () => {
     });
     expect(dashboard.projectionMonths[0]).toMatchObject({
       projectedMonthEndCents: dashboard.projectedMonthEndCents,
-      availableToSpendCents: dashboard.safeToSpendCents,
+      availableToSpendCents: dashboard.availableToSpendCents,
     });
   });
 

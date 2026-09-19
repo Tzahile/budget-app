@@ -4,7 +4,8 @@ A private household cash-flow web app built with Val Town, TypeScript, React,
 Hono and val-scoped Val Town SQLite.
 
 The dashboard answers what cash exists now, what is still expected or
-committed this month, what is protected, and what remains safe to spend.
+committed this month, what is protected, and what is deterministically
+available to spend.
 
 ## MVP features
 
@@ -14,7 +15,7 @@ committed this month, what is protected, and what remains safe to spend.
 - recurring and one-off planned income/expenses
 - mark planned items paid/received, then safely undo or correct the latest completion
 - protected reserves and target-date sinking funds linked safely to one-off planned expenses
-- projected month-end, safe-to-spend, and six-month deterministic cash-flow dashboard
+- projected month-end, deterministic available-to-spend, and six-month cash-flow dashboard
 - responsive mobile/desktop React UI
 - explicit synthetic demo dataset
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`

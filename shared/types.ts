@@ -121,7 +121,11 @@ export interface DashboardSummary {
   linkedGoalCoverageCents: number;
   protectedReservesCents: number;
   projectedMonthEndCents: number;
-  safeToSpendCents: number;
+  /**
+   * Deterministic amount left after known cash flow and protected reserves.
+   * This is an accounting fact, not advisory safe-spending guidance.
+   */
+  availableToSpendCents: number;
   upcoming: PlannedOccurrence[];
   projectionMonths: CashFlowProjectionMonth[];
 }
