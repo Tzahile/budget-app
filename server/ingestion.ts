@@ -118,6 +118,8 @@ export async function prepareCanonicalTransactions(input: {
   transactions: readonly CanonicalTransactionInput[];
   createId?: () => string;
 }): Promise<PreparedIngestionTransaction[]> {
+  // Node's Web Crypto implementation requires its receiver, unlike the
+  // Val Town runtime. Keep the default callable in both environments.
   const createId = input.createId ?? (() => crypto.randomUUID());
   const identities = new Set<string>();
   const prepared: PreparedIngestionTransaction[] = [];
