@@ -125,6 +125,7 @@ export function App() {
             onAddTransaction={() => setEditor({ type: "transaction" })}
             onAddPlanned={() => setEditor({ type: "planned" })}
             onCleanupDemo={cleanupDemo}
+            onNavigate={setView}
           />
         ) : view === "activity" ? (
           <Activity data={data} onAdd={() => setEditor({ type: "transaction" })} onAddTransfer={() => setEditor({ type: "transfer" })} onEdit={(item) => setEditor(item.kind === "transfer" ? { type: "transfer", item } : { type: "transaction", item })} onDelete={(item) => item.kind === "transfer"
@@ -163,7 +164,7 @@ export function App() {
   );
 }
 
-function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { data: AppData; onAddTransaction: () => void; onAddPlanned: () => void; onCleanupDemo: () => void }) {
+function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo, onNavigate }: { data: AppData; onAddTransaction: () => void; onAddPlanned: () => void; onCleanupDemo: () => void; onNavigate: (view: View) => void }) {
   const d = data.dashboard;
   return (
     <div>
@@ -183,6 +184,8 @@ function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { dat
         <p className="mt-3 text-5xl font-semibold tracking-tight sm:text-6xl">{money(d.availableToSpendCents)}</p>
         <p className="mt-4 max-w-2xl text-sm leading-relaxed text-green-100">Deterministic: cash now, plus expected income, minus unpaid commitments and protected reserves through {prettyDate(d.monthEnd)}. This is not spending advice.</p>
       </section>
+
+      <AvailabilityBreakdown data={data} onNavigate={onNavigate} />
 
       <section className="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Metric label="Cash now" value={d.currentCashCents} />
@@ -235,6 +238,47 @@ function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo }: { dat
       </section>
     </div>
   );
+}
+
+function AvailabilityBreakdown({ data, onNavigate }: { data: AppData; onNavigate: (view: View) => void }) {
+  const d = data.dashboard;
+  const linkedOccurrences = d.upcoming.filter((item) => item.linkedGoalCoverageCents > 0);
+  const traceLink = (label: string, view: View) => <button type="button" onClick={() => onNavigate(view)} className="text-left text-xs font-medium text-green-800 underline decoration-green-300 underline-offset-2 hover:text-green-950">{label}</button>;
+
+  return (
+    <details className="mt-5 rounded-2xl border border-stone-200 bg-white p-5">
+      <summary className="cursor-pointer list-none font-semibold marker:content-none">
+        <span className="flex items-center justify-between gap-4">How available to spend is calculated <span className="text-sm font-normal text-stone-500">Details</span></span>
+      </summary>
+      <p className="mt-4 text-sm leading-relaxed text-stone-600">This is a traceable accounting derivation through {prettyDate(d.monthEnd)}. It does not estimate discretionary spending or give advice.</p>
+      <div className="mt-5 divide-y divide-stone-100 rounded-xl border border-stone-100">
+        <BreakdownRow label="Cash now" amount={d.currentCashCents} operator="=" source={traceLink(`${data.accounts.filter((account) => account.isActive).length} active account${data.accounts.filter((account) => account.isActive).length === 1 ? "" : "s"}`, "accounts")}>
+          {data.accounts.filter((account) => account.isActive).map((account) => <SourceLine key={account.id} label={account.name} amount={account.balanceCents} />)}
+        </BreakdownRow>
+        <BreakdownRow label="Expected income" amount={d.remainingIncomeCents} operator="+" source={traceLink("View planned cash flow", "planned")}>
+          {d.upcoming.filter((item) => item.kind === "income").map((item, index) => <SourceLine key={`${item.plannedTransactionId}-${item.date}-${index}`} label={`${item.description} · ${prettyDate(item.date)}`} amount={item.amountCents} />)}
+        </BreakdownRow>
+        <BreakdownRow label="Unpaid commitments" amount={d.remainingExpensesCents} operator="−" source={traceLink("View planned cash flow", "planned")}>
+          {d.upcoming.filter((item) => item.kind === "expense").map((item, index) => <SourceLine key={`${item.plannedTransactionId}-${item.date}-${index}`} label={`${item.description} · ${prettyDate(item.date)}`} amount={-item.amountCents} />)}
+        </BreakdownRow>
+        <BreakdownRow label="Protected reserves and goals" amount={d.protectedReservesCents} operator="−" source={traceLink("View reserves and goals", "reserves")}>
+          <SourceLine label="Funded reserve amounts" amount={-d.fundedReservesCents} />
+          {d.requiredGoalContributionsCents > 0 && <SourceLine label="Goal contributions still required this month" amount={-d.requiredGoalContributionsCents} />}
+          {d.linkedGoalCoverageCents > 0 && <SourceLine label="Less goal funding already represented by a linked commitment" amount={d.linkedGoalCoverageCents} />}
+        </BreakdownRow>
+        {linkedOccurrences.length > 0 && <div className="px-4 py-4 text-sm"><p className="font-medium">Linked-goal effect</p><p className="mt-1 text-stone-500">The linked amount is added back once because the full planned expense above already subtracts it. This prevents double counting.</p><div className="mt-3 space-y-2">{linkedOccurrences.map((item, index) => <SourceLine key={`${item.plannedTransactionId}-${item.date}-${index}`} label={`${item.linkedReserveName}: ${item.description} · ${prettyDate(item.date)}`} amount={item.linkedGoalCoverageCents} />)}</div></div>}
+        <div className="flex items-center justify-between gap-4 bg-stone-50 px-4 py-4"><span className="font-semibold">Available to spend</span><span className="font-semibold">{money(d.availableToSpendCents)}</span></div>
+      </div>
+    </details>
+  );
+}
+
+function BreakdownRow({ label, amount, operator, source, children }: { label: string; amount: number; operator: "=" | "+" | "−"; source: ReactNode; children: ReactNode }) {
+  return <div className="px-4 py-4"><div className="flex items-start justify-between gap-4"><div><p className="font-medium">{operator === "=" ? "" : `${operator} `}{label}</p><div className="mt-1">{source}</div></div><span className="font-medium">{operator === "−" ? money(-amount) : money(amount)}</span></div><div className="mt-3 space-y-2 border-l-2 border-stone-100 pl-3">{children}</div></div>;
+}
+
+function SourceLine({ label, amount }: { label: string; amount: number }) {
+  return <div className="flex items-center justify-between gap-4 text-xs text-stone-500"><span className="min-w-0 truncate">{label}</span><span className="shrink-0">{money(amount)}</span></div>;
 }
 
 function Activity({ data, onAdd, onAddTransfer, onEdit, onDelete }: { data: AppData; onAdd: () => void; onAddTransfer: () => void; onEdit: (item: Transaction) => void; onDelete: (item: Transaction) => void }) {
