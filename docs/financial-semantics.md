@@ -45,6 +45,10 @@ income, spending, planned cash flow, and projections.
   repeated source record is identified deterministically and is never applied a
   second time. Imported rows retain a bounded source identifier and a minimal
   audit marker, but never raw credentials or bank connection secrets.
+- Every ingestion attempt has durable row-level outcomes. Runs containing an
+  invalid or ambiguous row are all-or-none failures: valid-looking siblings do
+  not change transactions or balances. Retrying an explicit request key returns
+  the original audit run; corrected data uses a new key.
 
 ## Planned items
 

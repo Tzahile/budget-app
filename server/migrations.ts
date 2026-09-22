@@ -183,6 +183,30 @@ export const migrations: readonly Migration[] = [
       "CREATE INDEX imports_account_created_idx ON imports(account_id, created_at DESC)",
     ],
   },
+  {
+    version: 9,
+    name: "ingestion run item history",
+    statements: [
+      "ALTER TABLE imports ADD COLUMN retry_key TEXT",
+      "ALTER TABLE imports ADD COLUMN ambiguous_count INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE imports ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0",
+      `CREATE UNIQUE INDEX imports_retry_key_idx
+        ON imports(source, account_id, retry_key) WHERE retry_key IS NOT NULL`,
+      `CREATE TABLE ingestion_items (
+        id TEXT PRIMARY KEY,
+        import_id TEXT NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
+        source_position INTEGER NOT NULL CHECK (source_position > 0),
+        status TEXT NOT NULL CHECK (status IN ('accepted', 'duplicate', 'error', 'ambiguous')),
+        transaction_id TEXT REFERENCES transactions(id) ON DELETE SET NULL,
+        import_identity TEXT,
+        error_code TEXT,
+        error_summary TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE (import_id, source_position)
+      )`,
+      "CREATE INDEX ingestion_items_import_idx ON ingestion_items(import_id, source_position)",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

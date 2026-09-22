@@ -26,6 +26,14 @@ export interface CsvColumnMapping {
 export interface CsvParseResult {
   transactions: CanonicalTransactionInput[];
   errors: string[];
+  rowErrors: IngestionRowError[];
+}
+
+export interface IngestionRowError {
+  sourcePosition: number;
+  code: "invalid_date" | "invalid_amount" | "invalid_description" | "external_id_too_long" | "invalid_status" | "invalid_row";
+  /** Bounded, allow-listed summary that cannot include source financial data. */
+  summary: string;
 }
 
 export interface PreparedIngestionTransaction extends CanonicalTransactionInput {
@@ -35,6 +43,7 @@ export interface PreparedIngestionTransaction extends CanonicalTransactionInput 
   identityKind: "external" | "fingerprint";
   kind: TransactionKind;
   metadataJson: string | null;
+  sourcePosition: number;
 }
 
 export type IngestionDuplicateDecision = "accepted" | "duplicate" | "ambiguous";
@@ -54,12 +63,15 @@ export interface IngestionWriteInput {
   now: string;
   transactions: PreparedIngestionTransaction[];
   assessments: readonly IngestionDuplicateAssessment[];
+  retryKey?: string | null;
 }
 
 export interface IngestionWritePlan {
   statements: MigrationStatement[];
   importedCount: number;
   duplicateCount: number;
+  ambiguousCount: number;
+  errorCount: number;
 }
 
 const maxCsvBytes = 500_000;
@@ -89,6 +101,7 @@ export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): Cs
   const statusIndex = mapping.status ? indexFor(mapping.status, false) : -1;
   const transactions: CanonicalTransactionInput[] = [];
   const errors: string[] = [];
+  const rowErrors: IngestionRowError[] = [];
 
   rows.slice(1).forEach((row, offset) => {
     const rowNumber = offset + 2;
@@ -106,10 +119,13 @@ export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): Cs
         auditMetadata: { adapter: "csv", row: String(rowNumber) },
       });
     } catch (error) {
-      errors.push(`Row ${rowNumber}: ${error instanceof Error ? error.message : "invalid value"}`);
+      const message = error instanceof Error ? error.message : "invalid value";
+      errors.push(`Row ${rowNumber}: ${message}`);
+      const code = csvErrorCode(message);
+      rowErrors.push({ sourcePosition: rowNumber, code, summary: safeRowErrorSummary(code) });
     }
   });
-  return { transactions, errors };
+  return { transactions, errors, rowErrors };
 }
 
 export async function prepareCanonicalTransactions(input: {
@@ -123,7 +139,7 @@ export async function prepareCanonicalTransactions(input: {
   const createId = input.createId ?? (() => crypto.randomUUID());
   const identities = new Set<string>();
   const prepared: PreparedIngestionTransaction[] = [];
-  for (const transaction of input.transactions) {
+  for (const [index, transaction] of input.transactions.entries()) {
     validateCanonical(transaction);
     const { importIdentity, identityKind } = await canonicalImportIdentity(input.source, input.accountId, transaction);
     // Keep repeated fallback tuples for assessment: they might be two genuine
@@ -138,6 +154,7 @@ export async function prepareCanonicalTransactions(input: {
       ...transaction, id: createId(), importIdentity, identityKind, kind,
       status: transaction.status ?? "cleared",
       metadataJson: serializeAuditMetadata(transaction.auditMetadata),
+      sourcePosition: sourcePosition(transaction, index),
     });
   }
   return prepared;
@@ -148,9 +165,12 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
     .filter((assessment) => assessment.decision === "accepted")
     .map((assessment) => assessment.transaction);
   const statements: MigrationStatement[] = [{
-    sql: `INSERT INTO imports (id, filename, source, account_id, status, row_count, imported_count, duplicate_count, created_at, completed_at)
-      VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, ?, NULL)`,
-    args: [input.importId, input.filename, input.source, input.accountId, input.transactions.length, input.now],
+    sql: `INSERT INTO imports
+      (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
+       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at)
+      VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, 0, 0, NULL, ?, ?, NULL)`,
+    args: [input.importId, input.filename, input.source, input.accountId, input.transactions.length,
+      input.retryKey ?? null, input.now],
   }];
   for (const transaction of imported) {
     statements.push({
@@ -172,15 +192,120 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
       });
     }
   }
+  for (const assessment of input.assessments) {
+    statements.push(ingestionItemStatement({
+      importId: input.importId,
+      sourcePosition: assessment.transaction.sourcePosition,
+      status: assessment.decision,
+      transactionId: assessment.decision === "accepted" ? assessment.transaction.id : null,
+      importIdentity: assessment.transaction.importIdentity,
+      errorCode: assessment.decision === "ambiguous" ? "ambiguous_fingerprint" : null,
+      errorSummary: assessment.decision === "ambiguous" ? "A similar transaction needs review" : null,
+      now: input.now,
+    }));
+  }
   statements.push({
-    sql: `UPDATE imports SET status = 'completed', imported_count = ?, duplicate_count = ?, completed_at = ? WHERE id = ?`,
-    args: [imported.length, input.assessments.filter((assessment) => assessment.decision === "duplicate").length, input.now, input.importId],
+    sql: `UPDATE imports SET status = 'completed', imported_count = ?, duplicate_count = ?,
+      ambiguous_count = 0, error_count = 0, completed_at = ? WHERE id = ?`,
+    args: [imported.length, input.assessments.filter((assessment) => assessment.decision === "duplicate").length,
+      input.now, input.importId],
   });
   return {
     statements,
     importedCount: imported.length,
     duplicateCount: input.assessments.filter((assessment) => assessment.decision === "duplicate").length,
+    ambiguousCount: 0,
+    errorCount: 0,
   };
+}
+
+export function rejectedIngestionWritePlan(input: IngestionWriteInput & {
+  rowErrors: readonly IngestionRowError[];
+  errorSummary: string;
+}): IngestionWritePlan {
+  const assessmentsByPosition = new Map(input.assessments.map((value) => [value.transaction.sourcePosition, value]));
+  const rowErrorsByPosition = new Map(input.rowErrors.map((value) => [value.sourcePosition, value]));
+  const positions = new Set([...assessmentsByPosition.keys(), ...rowErrorsByPosition.keys()]);
+  const statements: MigrationStatement[] = [{
+    sql: `INSERT INTO imports
+      (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
+       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at)
+      VALUES (?, ?, ?, ?, 'failed', ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [input.importId, input.filename, input.source, input.accountId, positions.size,
+      input.assessments.filter((value) => value.decision === "duplicate").length,
+      input.assessments.filter((value) => value.decision === "ambiguous").length,
+      input.rowErrors.length + input.assessments.filter((value) => value.decision === "accepted").length,
+      input.errorSummary, input.retryKey ?? null, input.now, input.now],
+  }];
+  for (const sourcePosition of [...positions].sort((a, b) => a - b)) {
+    const rowError = rowErrorsByPosition.get(sourcePosition);
+    const assessment = assessmentsByPosition.get(sourcePosition);
+    const status = rowError ? "error" : assessment?.decision === "accepted" ? "error" : assessment?.decision ?? "error";
+    statements.push(ingestionItemStatement({
+      importId: input.importId,
+      sourcePosition,
+      status,
+      transactionId: null,
+      importIdentity: assessment?.transaction.importIdentity ?? null,
+      errorCode: rowError?.code ?? (status === "ambiguous" ? "ambiguous_fingerprint" : status === "error" ? "run_blocked" : null),
+      errorSummary: rowError ? safeRowErrorSummary(rowError.code) : (status === "ambiguous"
+        ? "A similar transaction needs review"
+        : status === "error" ? "Not imported because the run was blocked" : null),
+      now: input.now,
+    }));
+  }
+  return {
+    statements,
+    importedCount: 0,
+    duplicateCount: input.assessments.filter((value) => value.decision === "duplicate").length,
+    ambiguousCount: input.assessments.filter((value) => value.decision === "ambiguous").length,
+    errorCount: input.rowErrors.length + input.assessments.filter((value) => value.decision === "accepted").length,
+  };
+}
+
+function ingestionItemStatement(input: {
+  importId: string;
+  sourcePosition: number;
+  status: IngestionDuplicateDecision | "error";
+  transactionId: string | null;
+  importIdentity: string | null;
+  errorCode: string | null;
+  errorSummary: string | null;
+  now: string;
+}): MigrationStatement {
+  return {
+    sql: `INSERT INTO ingestion_items
+      (id, import_id, source_position, status, transaction_id, import_identity, error_code, error_summary, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [crypto.randomUUID(), input.importId, input.sourcePosition, input.status, input.transactionId,
+      input.importIdentity, input.errorCode, input.errorSummary, input.now],
+  };
+}
+
+function sourcePosition(transaction: CanonicalTransactionInput, index: number): number {
+  const parsed = Number(transaction.auditMetadata?.row);
+  return transaction.auditMetadata?.adapter === "csv" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : index + 1;
+}
+
+function csvErrorCode(message: string): IngestionRowError["code"] {
+  if (message === "date is invalid") return "invalid_date";
+  if (message === "amount is invalid") return "invalid_amount";
+  if (message === "description is missing or too long") return "invalid_description";
+  if (message === "external ID is too long") return "external_id_too_long";
+  if (message === "status is invalid") return "invalid_status";
+  return "invalid_row";
+}
+
+function safeRowErrorSummary(code: IngestionRowError["code"]): string {
+  const summaries: Record<IngestionRowError["code"], string> = {
+    invalid_date: "Date is invalid",
+    invalid_amount: "Amount is invalid",
+    invalid_description: "Description is missing or too long",
+    external_id_too_long: "External ID is too long",
+    invalid_status: "Status is invalid",
+    invalid_row: "Row is invalid",
+  };
+  return summaries[code] ?? summaries.invalid_row;
 }
 
 /**
