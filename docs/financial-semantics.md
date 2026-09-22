@@ -41,6 +41,15 @@ income, spending, planned cash flow, and projections.
   account balances but are excluded from household income and spending. A
   transfer is created, edited, or deleted as one atomic group; its legs cannot
   be independently changed or deleted.
+- Cleared imported debit/credit records become possible internal-transfer
+  candidates only when they belong to different owned accounts, have exactly
+  opposite integer-cent amounts, and their posting dates are no more than
+  three calendar days apart. Description similarity is deliberately not used.
+  A candidate remains ordinary income/expense for household reporting when it
+  is pending, deferred, or rejected. Explicit confirmation changes both
+  existing legs to `transfer` and gives them one transfer group without
+  changing either account balance; competing candidates involving either leg
+  are rejected. Detection never confirms automatically.
 - Imports use the same canonical transaction model as future bank syncs. A
   repeated source record is identified deterministically and is never applied a
   second time. Imported rows retain a bounded source identifier and a minimal

@@ -29,6 +29,7 @@ import {
   updateTransfer,
   undoPlannedCompletion,
   deleteTransfer,
+  decideIngestedTransferCandidate,
 } from "./server/repository.ts";
 import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
 import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
@@ -175,6 +176,15 @@ app.post("/api/imports/csv", async (c) => {
     accountId, filename: stringField(body, "filename", 160), source: "csv", transactions: parsed.transactions,
   });
   return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+});
+
+app.post("/api/ingested-transfer-candidates/:id/decision", async (c) => {
+  const body = await readBody(c.req.raw);
+  await decideIngestedTransferCandidate(
+    safeId(c.req.param("id")),
+    enumField(body, "decision", ["confirm", "reject", "defer"] as const),
+  );
+  return c.json({ ok: true });
 });
 
 app.post("/api/planned", async (c) => {

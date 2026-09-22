@@ -21,6 +21,7 @@ available to spend.
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
 - canonical transaction ingestion with a validated CSV adapter and idempotent import runs
+- explicit review of detected owned-account transfers from imported transactions
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
 
