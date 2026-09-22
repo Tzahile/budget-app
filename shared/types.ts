@@ -4,6 +4,7 @@ export type TransactionStatus = "cleared" | "pending";
 export type Recurrence = "once" | "weekly" | "monthly" | "yearly";
 export type PlannedKind = "income" | "expense";
 export type DemoDataState = "empty" | "demo-only" | "real-or-mixed";
+export type IngestionItemStatus = "accepted" | "duplicate" | "error" | "ambiguous";
 export const DEMO_CLEANUP_CONFIRMATION = "DELETE DEMO DATA";
 
 export function canCleanupDemoData(state: DemoDataState): boolean {
@@ -48,6 +49,32 @@ export interface Transaction {
   voidedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface IngestionRunItem {
+  id: string;
+  sourcePosition: number;
+  status: IngestionItemStatus;
+  transactionId: string | null;
+  errorCode: string | null;
+  errorSummary: string | null;
+}
+
+export interface IngestionRun {
+  id: string;
+  accountId: string | null;
+  filename: string;
+  source: "csv" | "open_banking";
+  status: "processing" | "completed" | "failed";
+  rowCount: number;
+  acceptedCount: number;
+  duplicateCount: number;
+  ambiguousCount: number;
+  errorCount: number;
+  errorSummary: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  items: IngestionRunItem[];
 }
 
 export interface PlannedCompletion {

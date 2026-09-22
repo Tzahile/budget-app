@@ -5,6 +5,8 @@ import {
   type AccountReconciliation,
   type AppData,
   type DemoDataState,
+  type IngestionRun,
+  type IngestionRunItem,
   type PlannedCompletion,
   type PlannedTransaction,
   type Reserve,
@@ -29,7 +31,9 @@ import {
   assessIngestionDuplicates,
   ingestionWritePlan,
   prepareCanonicalTransactions,
+  rejectedIngestionWritePlan,
   type CanonicalTransactionInput,
+  type IngestionRowError,
   type IngestionSource,
 } from "./ingestion.ts";
 
@@ -206,9 +210,29 @@ export async function ingestTransactions(input: {
   filename: string;
   source: IngestionSource;
   transactions: readonly CanonicalTransactionInput[];
-}): Promise<{ importId: string; importedCount: number; duplicateCount: number }> {
+  rowErrors?: readonly IngestionRowError[];
+  retryKey?: string | null;
+}): Promise<{
+  importId: string;
+  importedCount: number;
+  duplicateCount: number;
+  ambiguousCount: number;
+  errorCount: number;
+  replayed: boolean;
+}> {
   await ensureSchema();
-  if (!input.transactions.length) throw Object.assign(new Error("No valid transactions to import"), { status: 400 });
+  const retryKey = normalizeRetryKey(input.retryKey);
+  if (retryKey) {
+    const previous = await one(
+      "SELECT * FROM imports WHERE source = ? AND account_id = ? AND retry_key = ?",
+      [input.source, input.accountId, retryKey],
+    );
+    if (previous) return replayIngestion(previous);
+  }
+  const rowErrors = input.rowErrors ?? [];
+  if (!input.transactions.length && !rowErrors.length) {
+    throw Object.assign(new Error("No transactions or row errors to record"), { status: 400 });
+  }
   const prepared = await prepareCanonicalTransactions({
     source: input.source, accountId: input.accountId, transactions: input.transactions,
   });
@@ -223,20 +247,124 @@ export async function ingestTransactions(input: {
   }
   const assessments = assessIngestionDuplicates(prepared, existing);
   const ambiguous = assessments.filter((assessment) => assessment.decision === "ambiguous");
-  if (ambiguous.length) {
-    // A fallback identity is only a collision signal. Do not let an import
-    // choose between losing a real record and double-counting it.
-    throw Object.assign(new Error(
-      `Import contains ${ambiguous.length} ambiguous transaction fingerprint${ambiguous.length === 1 ? "" : "s"}; add trusted source IDs or resolve the records before importing`,
-    ), { status: 409 });
-  }
   const importId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  if (ambiguous.length || rowErrors.length) {
+    // Failed runs are durable and inspectable, but never apply a subset of the
+    // source rows. A corrected retry is a new run (or reuses its explicit key).
+    const errorSummary = rejectedRunSummary(rowErrors.length, ambiguous.length);
+    const plan = rejectedIngestionWritePlan({
+      importId, accountId: input.accountId, filename: input.filename, source: input.source,
+      transactions: prepared, assessments, rowErrors, errorSummary, retryKey, now,
+    });
+    const replayed = await writeIngestionPlan(plan.statements, retryKey, input);
+    if (replayed) return replayed;
+    throw Object.assign(new Error(errorSummary), {
+      status: rowErrors.length ? 422 : 409,
+      importId,
+    });
+  }
   const plan = ingestionWritePlan({
     importId, accountId: input.accountId, filename: input.filename, source: input.source,
-    transactions: prepared, assessments, now: new Date().toISOString(),
+    transactions: prepared, assessments, retryKey, now,
   });
-  await db.batch(plan.statements);
-  return { importId, importedCount: plan.importedCount, duplicateCount: plan.duplicateCount };
+  const replayed = await writeIngestionPlan(plan.statements, retryKey, input);
+  if (replayed) return replayed;
+  return {
+    importId,
+    importedCount: plan.importedCount,
+    duplicateCount: plan.duplicateCount,
+    ambiguousCount: 0,
+    errorCount: 0,
+    replayed: false,
+  };
+}
+
+export async function getIngestionHistory(limit = 50): Promise<IngestionRun[]> {
+  await ensureSchema();
+  const safeLimit = Math.max(1, Math.min(100, Number.isSafeInteger(limit) ? limit : 50));
+  const runs = await db.execute({
+    sql: "SELECT * FROM imports ORDER BY created_at DESC, id DESC LIMIT ?",
+    args: [safeLimit],
+  });
+  if (!runs.rows.length) return [];
+  const ids = runs.rows.map((row) => String((row as Row).id));
+  const itemResult = await db.execute({
+    sql: `SELECT * FROM ingestion_items WHERE import_id IN (${ids.map(() => "?").join(", ")})
+      ORDER BY import_id, source_position`,
+    args: ids,
+  });
+  const byRun = new Map<string, IngestionRunItem[]>();
+  for (const itemRow of itemResult.rows) {
+    const row = itemRow as Row;
+    const items = byRun.get(String(row.import_id)) ?? [];
+    items.push(mapIngestionItem(row));
+    byRun.set(String(row.import_id), items);
+  }
+  return runs.rows.map((runRow) => mapIngestionRun(runRow as Row, byRun.get(String((runRow as Row).id)) ?? []));
+}
+
+async function writeIngestionPlan(
+  statements: Parameters<typeof db.batch>[0],
+  retryKey: string | null,
+  input: { source: IngestionSource; accountId: string },
+): Promise<ReturnType<typeof replayIngestion> | null> {
+  try {
+    await db.batch(statements);
+    return null;
+  } catch (error) {
+    // Two requests with the same explicit retry key can race. The unique index
+    // rolls back the losing batch, so returning the committed run is safe.
+    if (retryKey && error instanceof Error && /constraint|unique/i.test(error.message)) {
+      const previous = await one(
+        "SELECT * FROM imports WHERE source = ? AND account_id = ? AND retry_key = ?",
+        [input.source, input.accountId, retryKey],
+      );
+      if (previous) return replayIngestion(previous);
+    }
+    throw error;
+  }
+}
+
+function replayIngestion(row: Row): {
+  importId: string;
+  importedCount: number;
+  duplicateCount: number;
+  ambiguousCount: number;
+  errorCount: number;
+  replayed: boolean;
+} {
+  if (row.status === "failed") {
+    throw Object.assign(new Error(String(row.error_summary || "Ingestion failed")), {
+      status: Number(row.error_count) > 0 ? 422 : 409,
+      importId: String(row.id),
+      replayed: true,
+    });
+  }
+  return {
+    importId: String(row.id),
+    importedCount: Number(row.imported_count),
+    duplicateCount: Number(row.duplicate_count),
+    ambiguousCount: Number(row.ambiguous_count),
+    errorCount: Number(row.error_count),
+    replayed: true,
+  };
+}
+
+function normalizeRetryKey(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 200 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+    throw Object.assign(new Error("Retry key is invalid"), { status: 400 });
+  }
+  return normalized;
+}
+
+function rejectedRunSummary(errorCount: number, ambiguousCount: number): string {
+  const parts: string[] = [];
+  if (errorCount) parts.push(`${errorCount} invalid row${errorCount === 1 ? "" : "s"}`);
+  if (ambiguousCount) parts.push(`${ambiguousCount} ambiguous row${ambiguousCount === 1 ? "" : "s"}`);
+  return `Import blocked: ${parts.join(" and ")}`;
 }
 
 export async function updateTransaction(id: string, input: {
@@ -564,6 +692,36 @@ function mapTransaction(row: Row): Transaction {
     correctedFromTransactionId: row.corrected_from_transaction_id == null ? null : String(row.corrected_from_transaction_id),
     voidedAt: row.voided_at == null ? null : String(row.voided_at),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapIngestionItem(row: Row): IngestionRunItem {
+  return {
+    id: String(row.id),
+    sourcePosition: Number(row.source_position),
+    status: row.status as IngestionRunItem["status"],
+    transactionId: row.transaction_id == null ? null : String(row.transaction_id),
+    errorCode: row.error_code == null ? null : String(row.error_code),
+    errorSummary: row.error_summary == null ? null : String(row.error_summary),
+  };
+}
+
+function mapIngestionRun(row: Row, items: IngestionRunItem[]): IngestionRun {
+  return {
+    id: String(row.id),
+    accountId: row.account_id == null ? null : String(row.account_id),
+    filename: String(row.filename),
+    source: row.source as IngestionRun["source"],
+    status: row.status as IngestionRun["status"],
+    rowCount: Number(row.row_count),
+    acceptedCount: Number(row.imported_count),
+    duplicateCount: Number(row.duplicate_count),
+    ambiguousCount: Number(row.ambiguous_count),
+    errorCount: Number(row.error_count),
+    errorSummary: row.error_summary == null ? null : String(row.error_summary),
+    createdAt: String(row.created_at),
+    completedAt: row.completed_at == null ? null : String(row.completed_at),
+    items,
   };
 }
 

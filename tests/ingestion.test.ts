@@ -5,6 +5,7 @@ import {
   ingestionWritePlan,
   parseCsvTransactions,
   prepareCanonicalTransactions,
+  rejectedIngestionWritePlan,
 } from "../server/ingestion.ts";
 
 describe("CSV canonical ingestion adapter", () => {
@@ -25,6 +26,7 @@ describe("CSV canonical ingestion adapter", () => {
     });
     expect(result.transactions).toHaveLength(1);
     expect(result.errors).toEqual(["Row 3: date is invalid"]);
+    expect(result.rowErrors).toEqual([{ sourcePosition: 3, code: "invalid_date", summary: "Date is invalid" }]);
   });
 
   it("uses account-scoped external IDs across source types and a stable normalized fingerprint otherwise", async () => {
@@ -50,7 +52,7 @@ describe("CSV canonical ingestion adapter", () => {
       assessments: assessIngestionDuplicates(prepared, new Set([prepared[1].importIdentity])),
     });
     expect(plan).toMatchObject({ importedCount: 1, duplicateCount: 1 });
-    expect(plan.statements.map((statement) => typeof statement === "string" ? statement : statement.sql)).toHaveLength(4);
+    expect(plan.statements.map((statement) => typeof statement === "string" ? statement : statement.sql)).toHaveLength(6);
   });
 
   it("marks repeated trusted external IDs as duplicates but accepts records in different accounts", async () => {
@@ -84,5 +86,26 @@ describe("CSV canonical ingestion adapter", () => {
       { decision: "accepted", reason: "new_identity" },
       { decision: "ambiguous", reason: "fallback_fingerprint" },
     ]);
+  });
+
+  it("records a blocked run with safe row outcomes and no transaction writes", async () => {
+    const transactions = await prepareCanonicalTransactions({
+      source: "csv", accountId: "account-a", createId: () => "tx-1",
+      transactions: [{
+        occurredOn: "2026-09-16", amountCents: -1234, description: "Private source text",
+        auditMetadata: { adapter: "csv", row: "2" },
+      }],
+    });
+    const plan = rejectedIngestionWritePlan({
+      importId: "import-a", accountId: "account-a", filename: "synthetic.csv", source: "csv",
+      now: "2026-09-17T10:00:00.000Z", transactions,
+      assessments: assessIngestionDuplicates(transactions, new Set()),
+      rowErrors: [{ sourcePosition: 3, code: "invalid_amount", summary: "Amount is invalid" }],
+      errorSummary: "Import blocked: 1 invalid row",
+    });
+    const sql = plan.statements.map((statement) => typeof statement === "string" ? statement : statement.sql).join("\n");
+    expect(sql).not.toContain("INSERT OR IGNORE INTO transactions");
+    expect(JSON.stringify(plan.statements)).not.toContain("Private source text");
+    expect(plan).toMatchObject({ importedCount: 0, ambiguousCount: 0, errorCount: 2 });
   });
 });
