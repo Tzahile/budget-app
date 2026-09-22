@@ -42,6 +42,15 @@ trusted-ID duplicates are skipped without changing balances.
 Pending imported rows are stored but do not affect current balances until a
 later sync/reconciliation flow clears them.
 
+After accepted cleared rows are prepared, the same ingestion batch records
+possible owned-account transfer pairs. Detection requires different accounts,
+equal opposite amounts, and a date distance of at most three calendar days.
+The persisted review state supports pending, deferred, rejected, and confirmed
+decisions. Re-imports reuse the transaction identities and pair uniqueness, so
+they neither recreate decisions nor regroup legs. Only explicit confirmation
+reclassifies the two existing transactions and links them with a transfer group;
+account balances are not mutated by that classification step.
+
 Open Banking is read-only and adapter-based: provider-hosted consent keeps bank
 credentials out of BudgetApp, provider secrets remain server-side, and a
 provider adapter feeds the same canonical ingestion path as CSV. Provider

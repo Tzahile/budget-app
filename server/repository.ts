@@ -5,6 +5,7 @@ import {
   type AccountReconciliation,
   type AppData,
   type DemoDataState,
+  type IngestedTransferCandidate,
   type PlannedCompletion,
   type PlannedTransaction,
   type Reserve,
@@ -32,13 +33,19 @@ import {
   type CanonicalTransactionInput,
   type IngestionSource,
 } from "./ingestion.ts";
+import {
+  decideTransferCandidateStatements,
+  detectIngestedTransferPairs,
+  insertTransferCandidateStatements,
+  type TransferDetectionTransaction,
+} from "./ingested-transfers.ts";
 
 type Row = Record<string, unknown>;
 
 export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   await ensureSchema();
   const monthStart = `${asOfDate.slice(0, 7)}-01`;
-  const [accountResult, reconciliationResult, transactionResult, dashboardTransactionResult, plannedResult, completionResult, reserveResult, demoResult] = await Promise.all([
+  const [accountResult, reconciliationResult, transactionResult, dashboardTransactionResult, plannedResult, completionResult, reserveResult, demoResult, transferCandidateResult] = await Promise.all([
     db.execute("SELECT * FROM accounts ORDER BY is_active DESC, name COLLATE NOCASE"),
     db.execute("SELECT * FROM account_reconciliations ORDER BY date DESC, created_at DESC LIMIT 500"),
     db.execute("SELECT * FROM transactions WHERE voided_at IS NULL ORDER BY date DESC, created_at DESC LIMIT 500"),
@@ -47,6 +54,7 @@ export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
     db.execute(PLANNED_COMPLETIONS_QUERY),
     db.execute("SELECT * FROM reserves ORDER BY is_active DESC, name COLLATE NOCASE"),
     db.execute(demoStateQuery()),
+    db.execute("SELECT * FROM ingested_transfer_candidates ORDER BY created_at DESC LIMIT 500"),
   ]);
   const accounts = accountResult.rows.map(mapAccount);
   const accountReconciliations = reconciliationResult.rows.map(mapReconciliation);
@@ -60,6 +68,7 @@ export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
     accounts,
     accountReconciliations,
     transactions,
+    ingestedTransferCandidates: transferCandidateResult.rows.map(mapIngestedTransferCandidate),
     plannedTransactions,
     plannedCompletions,
     reserves,
@@ -235,8 +244,47 @@ export async function ingestTransactions(input: {
     importId, accountId: input.accountId, filename: input.filename, source: input.source,
     transactions: prepared, assessments, now: new Date().toISOString(),
   });
+  const eligible = await db.execute(`SELECT id, account_id, date, amount_cents FROM transactions
+    WHERE source = 'import' AND status = 'cleared' AND kind IN ('income', 'expense')
+      AND voided_at IS NULL AND transfer_group_id IS NULL`);
+  const acceptedForDetection: TransferDetectionTransaction[] = assessments
+    .filter((assessment) => assessment.decision === "accepted" && assessment.transaction.status !== "pending")
+    .map(({ transaction }) => ({
+      id: transaction.id,
+      accountId: input.accountId,
+      occurredOn: transaction.occurredOn,
+      amountCents: transaction.amountCents,
+    }));
+  const existingForDetection: TransferDetectionTransaction[] = eligible.rows.map((row) => ({
+    id: String(row.id), accountId: String(row.account_id), occurredOn: String(row.date), amountCents: Number(row.amount_cents),
+  }));
+  plan.statements.push(...insertTransferCandidateStatements({
+    pairs: detectIngestedTransferPairs([...existingForDetection, ...acceptedForDetection]),
+    now: new Date().toISOString(),
+  }));
   await db.batch(plan.statements);
   return { importId, importedCount: plan.importedCount, duplicateCount: plan.duplicateCount };
+}
+
+export async function decideIngestedTransferCandidate(
+  id: string,
+  decision: "confirm" | "reject" | "defer",
+): Promise<void> {
+  await ensureSchema();
+  const existing = await one("SELECT status FROM ingested_transfer_candidates WHERE id = ?", [id]);
+  if (!existing) throw notFound("Transfer candidate");
+  if (existing.status === "confirmed" || existing.status === "rejected") {
+    throw conflict("This transfer candidate has already been decided");
+  }
+  const transferGroupId = crypto.randomUUID();
+  await db.batch(decideTransferCandidateStatements({
+    candidateId: id, decision, transferGroupId, now: new Date().toISOString(),
+  }));
+  const updated = await one("SELECT status, transfer_group_id FROM ingested_transfer_candidates WHERE id = ?", [id]);
+  const expectedStatus = decision === "confirm" ? "confirmed" : decision === "reject" ? "rejected" : "deferred";
+  if (updated?.status !== expectedStatus) {
+    throw conflict("Transfer candidate no longer matches eligible imported transactions");
+  }
 }
 
 export async function updateTransaction(id: string, input: {
@@ -564,6 +612,18 @@ function mapTransaction(row: Row): Transaction {
     correctedFromTransactionId: row.corrected_from_transaction_id == null ? null : String(row.corrected_from_transaction_id),
     voidedAt: row.voided_at == null ? null : String(row.voided_at),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  };
+}
+
+function mapIngestedTransferCandidate(row: Row): IngestedTransferCandidate {
+  return {
+    id: String(row.id),
+    outgoingTransactionId: String(row.outgoing_transaction_id),
+    incomingTransactionId: String(row.incoming_transaction_id),
+    status: row.status as IngestedTransferCandidate["status"],
+    transferGroupId: row.transfer_group_id == null ? null : String(row.transfer_group_id),
+    createdAt: String(row.created_at),
+    decidedAt: row.decided_at == null ? null : String(row.decided_at),
   };
 }
 
