@@ -26,6 +26,7 @@ import {
 import { reconcileAccountStatements } from "./reconciliation-operations.ts";
 import { createReserveStatement, updateReserveStatement } from "./reserve-operations.ts";
 import {
+  assessIngestionDuplicates,
   ingestionWritePlan,
   prepareCanonicalTransactions,
   type CanonicalTransactionInput,
@@ -220,10 +221,19 @@ export async function ingestTransactions(input: {
     });
     for (const row of result.rows) existing.add(String((row as Row).import_identity));
   }
+  const assessments = assessIngestionDuplicates(prepared, existing);
+  const ambiguous = assessments.filter((assessment) => assessment.decision === "ambiguous");
+  if (ambiguous.length) {
+    // A fallback identity is only a collision signal. Do not let an import
+    // choose between losing a real record and double-counting it.
+    throw Object.assign(new Error(
+      `Import contains ${ambiguous.length} ambiguous transaction fingerprint${ambiguous.length === 1 ? "" : "s"}; add trusted source IDs or resolve the records before importing`,
+    ), { status: 409 });
+  }
   const importId = crypto.randomUUID();
   const plan = ingestionWritePlan({
     importId, accountId: input.accountId, filename: input.filename, source: input.source,
-    transactions: prepared, duplicateIdentities: existing, now: new Date().toISOString(),
+    transactions: prepared, assessments, now: new Date().toISOString(),
   });
   await db.batch(plan.statements);
   return { importId, importedCount: plan.importedCount, duplicateCount: plan.duplicateCount };

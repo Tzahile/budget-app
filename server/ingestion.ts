@@ -31,8 +31,19 @@ export interface CsvParseResult {
 export interface PreparedIngestionTransaction extends CanonicalTransactionInput {
   id: string;
   importIdentity: string;
+  /** External IDs can prove an existing record is the same; fingerprints cannot. */
+  identityKind: "external" | "fingerprint";
   kind: TransactionKind;
   metadataJson: string | null;
+}
+
+export type IngestionDuplicateDecision = "accepted" | "duplicate" | "ambiguous";
+
+export interface IngestionDuplicateAssessment {
+  transaction: PreparedIngestionTransaction;
+  decision: IngestionDuplicateDecision;
+  /** Stable, non-sensitive reason suitable for UI/API feedback. */
+  reason: "new_identity" | "trusted_external_id" | "fallback_fingerprint";
 }
 
 export interface IngestionWriteInput {
@@ -42,7 +53,7 @@ export interface IngestionWriteInput {
   source: IngestionSource;
   now: string;
   transactions: PreparedIngestionTransaction[];
-  duplicateIdentities: ReadonlySet<string>;
+  assessments: readonly IngestionDuplicateAssessment[];
 }
 
 export interface IngestionWritePlan {
@@ -107,17 +118,22 @@ export async function prepareCanonicalTransactions(input: {
   transactions: readonly CanonicalTransactionInput[];
   createId?: () => string;
 }): Promise<PreparedIngestionTransaction[]> {
-  const createId = input.createId ?? crypto.randomUUID;
+  const createId = input.createId ?? (() => crypto.randomUUID());
   const identities = new Set<string>();
   const prepared: PreparedIngestionTransaction[] = [];
   for (const transaction of input.transactions) {
     validateCanonical(transaction);
-    const importIdentity = await canonicalImportIdentity(input.source, input.accountId, transaction);
-    if (identities.has(importIdentity)) throw new Error("The import contains duplicate transactions");
+    const { importIdentity, identityKind } = await canonicalImportIdentity(input.source, input.accountId, transaction);
+    // Keep repeated fallback tuples for assessment: they might be two genuine
+    // transactions, so rejecting/dropping one here would lose data.
+    if (identityKind === "external" && identities.has(importIdentity)) {
+      // It is safe to classify this as a duplicate later because the external
+      // identifier is a trusted source identity, unlike a descriptive tuple.
+    }
     identities.add(importIdentity);
     const kind: TransactionKind = transaction.amountCents > 0 ? "income" : "expense";
     prepared.push({
-      ...transaction, id: createId(), importIdentity, kind,
+      ...transaction, id: createId(), importIdentity, identityKind, kind,
       status: transaction.status ?? "cleared",
       metadataJson: serializeAuditMetadata(transaction.auditMetadata),
     });
@@ -126,7 +142,9 @@ export async function prepareCanonicalTransactions(input: {
 }
 
 export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePlan {
-  const imported = input.transactions.filter((transaction) => !input.duplicateIdentities.has(transaction.importIdentity));
+  const imported = input.assessments
+    .filter((assessment) => assessment.decision === "accepted")
+    .map((assessment) => assessment.transaction);
   const statements: MigrationStatement[] = [{
     sql: `INSERT INTO imports (id, filename, source, account_id, status, row_count, imported_count, duplicate_count, created_at, completed_at)
       VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, ?, NULL)`,
@@ -154,18 +172,58 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
   }
   statements.push({
     sql: `UPDATE imports SET status = 'completed', imported_count = ?, duplicate_count = ?, completed_at = ? WHERE id = ?`,
-    args: [imported.length, input.transactions.length - imported.length, input.now, input.importId],
+    args: [imported.length, input.assessments.filter((assessment) => assessment.decision === "duplicate").length, input.now, input.importId],
   });
-  return { statements, importedCount: imported.length, duplicateCount: input.transactions.length - imported.length };
+  return {
+    statements,
+    importedCount: imported.length,
+    duplicateCount: input.assessments.filter((assessment) => assessment.decision === "duplicate").length,
+  };
 }
 
-export async function canonicalImportIdentity(source: IngestionSource, accountId: string, transaction: CanonicalTransactionInput): Promise<string> {
-  const stable = transaction.externalId?.trim()
-    ? `external:${transaction.externalId.trim()}`
-    : `tuple:${transaction.occurredOn}\u001f${transaction.amountCents}\u001f${transaction.description.trim()}\u001f${transaction.status ?? "cleared"}`;
-  const bytes = new TextEncoder().encode(`${source}\u001f${accountId}\u001f${stable}`);
+/**
+ * Build an account-scoped identity without tying it to an adapter. An account
+ * can first receive a CSV then later an Open Banking sync; a trusted external
+ * ID must still deduplicate across those sources. Fallback fingerprints are
+ * deliberately conservative and are never sufficient evidence to discard a
+ * pre-existing record.
+ */
+export async function canonicalImportIdentity(_source: IngestionSource, accountId: string, transaction: CanonicalTransactionInput): Promise<{
+  importIdentity: string;
+  identityKind: "external" | "fingerprint";
+}> {
+  const externalId = transaction.externalId?.trim();
+  const identityKind = externalId ? "external" : "fingerprint";
+  const stable = externalId
+    ? `external:${externalId}`
+    : `fingerprint:${transaction.occurredOn}\u001f${transaction.amountCents}\u001f${normalizeFingerprintDescription(transaction.description)}`;
+  const bytes = new TextEncoder().encode(`v2\u001f${accountId}\u001f${stable}`);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return `${source}:sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return {
+    importIdentity: `v2:${identityKind}:sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+    identityKind,
+  };
+}
+
+/**
+ * Decide every row before writes. Only trusted external IDs become automatic
+ * duplicates. A matching fallback fingerprint is ambiguous: importing it can
+ * double-count, while skipping it can silently lose a legitimate purchase.
+ */
+export function assessIngestionDuplicates(
+  transactions: readonly PreparedIngestionTransaction[],
+  existingIdentities: ReadonlySet<string>,
+): IngestionDuplicateAssessment[] {
+  const seen = new Set(existingIdentities);
+  return transactions.map((transaction) => {
+    const exists = seen.has(transaction.importIdentity);
+    seen.add(transaction.importIdentity);
+    if (!exists) return { transaction, decision: "accepted", reason: "new_identity" };
+    if (transaction.identityKind === "external") {
+      return { transaction, decision: "duplicate", reason: "trusted_external_id" };
+    }
+    return { transaction, decision: "ambiguous", reason: "fallback_fingerprint" };
+  });
 }
 
 function validateCanonical(transaction: CanonicalTransactionInput): void {
@@ -226,4 +284,11 @@ function parseStatus(value: string): TransactionStatus {
   const status = knownStatus.get(value.trim().toLowerCase());
   if (!status) throw new Error("status is invalid");
   return status;
+}
+
+function normalizeFingerprintDescription(value: string): string {
+  // NFKC handles equivalent Unicode representations; whitespace/case changes
+  // are common CSV presentation differences. Punctuation is intentionally
+  // retained because stripping it makes distinct merchant references collide.
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
 }

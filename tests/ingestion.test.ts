@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assessIngestionDuplicates,
   canonicalImportIdentity,
   ingestionWritePlan,
   parseCsvTransactions,
@@ -26,14 +27,13 @@ describe("CSV canonical ingestion adapter", () => {
     expect(result.errors).toEqual(["Row 3: date is invalid"]);
   });
 
-  it("uses external IDs when available and a stable tuple otherwise", async () => {
+  it("uses account-scoped external IDs across source types and a stable normalized fingerprint otherwise", async () => {
     const source = { occurredOn: "2026-09-16", amountCents: -1234, description: "Coffee", status: "cleared" as const };
-    await expect(canonicalImportIdentity("csv", "account-a", source)).resolves.toBe(
-      await canonicalImportIdentity("csv", "account-a", source),
-    );
-    await expect(canonicalImportIdentity("csv", "account-a", { ...source, externalId: "bank-1" })).resolves.not.toBe(
-      await canonicalImportIdentity("csv", "account-a", { ...source, externalId: "bank-2" }),
-    );
+    const fingerprint = await canonicalImportIdentity("csv", "account-a", source);
+    expect(fingerprint).toEqual(await canonicalImportIdentity("open_banking", "account-a", { ...source, description: "  COFFEE  " }));
+    const external = await canonicalImportIdentity("csv", "account-a", { ...source, externalId: "bank-1" });
+    expect(external).toEqual(await canonicalImportIdentity("open_banking", "account-a", { ...source, externalId: "bank-1" }));
+    expect(external).not.toEqual(await canonicalImportIdentity("csv", "account-b", { ...source, externalId: "bank-1" }));
   });
 
   it("writes imported rows, balance changes, and the completed run atomically", async () => {
@@ -41,24 +41,48 @@ describe("CSV canonical ingestion adapter", () => {
       source: "csv", accountId: "account-a", createId: (() => { let value = 0; return () => `tx-${++value}`; })(),
       transactions: [
         { occurredOn: "2026-09-16", amountCents: -1234, description: "Coffee" },
-        { occurredOn: "2026-09-17", amountCents: 5000, description: "Pending salary", status: "pending" },
+        { occurredOn: "2026-09-17", amountCents: 5000, description: "Pending salary", status: "pending", externalId: "salary-1" },
       ],
     });
     const plan = ingestionWritePlan({
       importId: "import-a", accountId: "account-a", filename: "synthetic.csv", source: "csv", now: "2026-09-17T10:00:00.000Z",
-      transactions: prepared, duplicateIdentities: new Set([prepared[1].importIdentity]),
+      transactions: prepared,
+      assessments: assessIngestionDuplicates(prepared, new Set([prepared[1].importIdentity])),
     });
     expect(plan).toMatchObject({ importedCount: 1, duplicateCount: 1 });
     expect(plan.statements.map((statement) => typeof statement === "string" ? statement : statement.sql)).toHaveLength(4);
   });
 
-  it("rejects duplicate source rows before any database write plan", async () => {
-    await expect(prepareCanonicalTransactions({
+  it("marks repeated trusted external IDs as duplicates but accepts records in different accounts", async () => {
+    const transactions = await prepareCanonicalTransactions({
       source: "csv", accountId: "account-a", createId: () => "ignored",
       transactions: [
         { occurredOn: "2026-09-16", amountCents: -1234, description: "Coffee", externalId: "same" },
         { occurredOn: "2026-09-17", amountCents: -300, description: "Tea", externalId: "same" },
       ],
-    })).rejects.toThrow("duplicate transactions");
+    });
+    expect(assessIngestionDuplicates(transactions, new Set()).map(({ decision, reason }) => ({ decision, reason }))).toEqual([
+      { decision: "accepted", reason: "new_identity" },
+      { decision: "duplicate", reason: "trusted_external_id" },
+    ]);
+    const otherAccount = await prepareCanonicalTransactions({
+      source: "open_banking", accountId: "account-b", transactions: [
+        { occurredOn: "2026-09-16", amountCents: -1234, description: "Coffee", externalId: "same" },
+      ],
+    });
+    expect(assessIngestionDuplicates(otherAccount, new Set([transactions[0].importIdentity]))[0].decision).toBe("accepted");
+  });
+
+  it("flags fallback fingerprint collisions as ambiguous instead of silently dropping a legitimate similar record", async () => {
+    const transactions = await prepareCanonicalTransactions({
+      source: "csv", accountId: "account-a", transactions: [
+        { occurredOn: "2026-09-16", amountCents: -1234, description: "Coffee shop" },
+        { occurredOn: "2026-09-16", amountCents: -1234, description: "  COFFEE   SHOP " },
+      ],
+    });
+    expect(assessIngestionDuplicates(transactions, new Set()).map(({ decision, reason }) => ({ decision, reason }))).toEqual([
+      { decision: "accepted", reason: "new_identity" },
+      { decision: "ambiguous", reason: "fallback_fingerprint" },
+    ]);
   });
 });
