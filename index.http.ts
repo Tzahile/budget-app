@@ -30,6 +30,7 @@ import {
   updateTransfer,
   undoPlannedCompletion,
   deleteTransfer,
+  decideIngestedTransferCandidate,
 } from "./server/repository.ts";
 import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
 import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
@@ -201,6 +202,15 @@ app.get("/api/imports", async (c) => {
   const limit = rawLimit == null ? 50 : Number(rawLimit);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ValidationError("limit must be between 1 and 100");
   return c.json({ imports: await getIngestionHistory(limit) });
+});
+
+app.post("/api/ingested-transfer-candidates/:id/decision", async (c) => {
+  const body = await readBody(c.req.raw);
+  await decideIngestedTransferCandidate(
+    safeId(c.req.param("id")),
+    enumField(body, "decision", ["confirm", "reject", "defer"] as const),
+  );
+  return c.json({ ok: true });
 });
 
 app.post("/api/planned", async (c) => {

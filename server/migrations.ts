@@ -207,6 +207,25 @@ export const migrations: readonly Migration[] = [
       "CREATE INDEX ingestion_items_import_idx ON ingestion_items(import_id, source_position)",
     ],
   },
+  {
+    version: 10,
+    name: "ingested internal transfer candidates",
+    statements: [
+      `CREATE TABLE ingested_transfer_candidates (
+        id TEXT PRIMARY KEY,
+        outgoing_transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+        incoming_transaction_id TEXT NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'deferred', 'confirmed', 'rejected')),
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        transfer_group_id TEXT,
+        UNIQUE(outgoing_transaction_id, incoming_transaction_id),
+        CHECK (outgoing_transaction_id <> incoming_transaction_id),
+        CHECK ((status = 'confirmed') = (transfer_group_id IS NOT NULL))
+      )`,
+       "CREATE INDEX ingested_transfer_candidates_status_idx ON ingested_transfer_candidates(status, created_at)",
+    ],
+  },
 ];
 
 export async function migrateDatabase(
