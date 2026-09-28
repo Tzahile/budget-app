@@ -12,6 +12,7 @@ import {
   deleteTransaction,
   deleteTransfer,
   getAppData,
+  getIngestionHistory,
   ingestTransactions,
   reconcileAccount,
   undoPlannedCompletion,
@@ -107,5 +108,83 @@ describe("repository integration against the migrated SQLite schema", () => {
     await expect(updateTransaction(String(row("SELECT id FROM transactions WHERE external_id = ?", "synthetic-bank-1").id), {
       accountId: current.id, date: "2026-09-22", amountCents: 1_500, description: "Must not edit import", kind: "expense",
     })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("keeps row-level ingestion history and makes explicit retries idempotent", async () => {
+    await createAccount({ name: "Ingestion history account", type: "checking", balanceCents: 20_000 });
+    const account = (await getAppData("2026-09-30")).accounts.find((value) => value.name === "Ingestion history account")!;
+    const transaction = {
+      occurredOn: "2026-09-23", amountCents: -2_000, description: "Synthetic source row",
+      externalId: "history-source-1", status: "cleared" as const,
+    };
+    const first = await ingestTransactions({
+      accountId: account.id, filename: "history.csv", source: "csv", transactions: [transaction],
+      retryKey: "upload-history-1",
+    });
+    const retry = await ingestTransactions({
+      accountId: account.id, filename: "history.csv", source: "csv", transactions: [transaction],
+      retryKey: "upload-history-1",
+    });
+    expect(retry).toMatchObject({ importId: first.importId, importedCount: 1, replayed: true });
+    expect(row("SELECT balance_cents FROM accounts WHERE id = ?", account.id).balance_cents).toBe(18_000);
+
+    let failedImportId = "";
+    try {
+      await ingestTransactions({
+        accountId: account.id, filename: "invalid.csv", source: "csv", transactions: [],
+        rowErrors: [{ sourcePosition: 2, code: "invalid_amount", summary: "Amount is invalid" }],
+        retryKey: "upload-invalid-1",
+      });
+    } catch (error) {
+      expect(error).toMatchObject({ status: 422 });
+      failedImportId = String((error as Error & { importId: string }).importId);
+    }
+
+    const history = await getIngestionHistory(10);
+    const completed = history.find((run) => run.id === first.importId)!;
+    expect(completed).toMatchObject({
+      status: "completed", rowCount: 1, acceptedCount: 1, duplicateCount: 0,
+      ambiguousCount: 0, errorCount: 0,
+    });
+    expect(completed.items).toEqual([expect.objectContaining({ sourcePosition: 1, status: "accepted" })]);
+    const failed = history.find((run) => run.id === failedImportId)!;
+    expect(failed).toMatchObject({
+      status: "failed", rowCount: 1, acceptedCount: 0, errorCount: 1,
+      errorSummary: "Import blocked: 1 invalid row",
+    });
+    expect(failed.items).toEqual([expect.objectContaining({
+      sourcePosition: 2, status: "error", errorCode: "invalid_amount", errorSummary: "Amount is invalid",
+    })]);
+  });
+
+  it("records ambiguous rows without partially mutating transactions or balances", async () => {
+    await createAccount({ name: "Ambiguity history account", type: "checking", balanceCents: 10_000 });
+    const account = (await getAppData("2026-09-30")).accounts.find((value) => value.name === "Ambiguity history account")!;
+    const source = { occurredOn: "2026-09-24", amountCents: -750, description: "Synthetic same-day payment" };
+    await ingestTransactions({ accountId: account.id, filename: "first.csv", source: "csv", transactions: [source] });
+    let failedImportId = "";
+    try {
+      await ingestTransactions({
+        accountId: account.id, filename: "second.csv", source: "csv", transactions: [source],
+        retryKey: "ambiguous-retry-1",
+      });
+    } catch (error) {
+      expect(error).toMatchObject({ status: 409 });
+      failedImportId = String((error as Error & { importId: string }).importId);
+    }
+    expect(row("SELECT balance_cents FROM accounts WHERE id = ?", account.id).balance_cents).toBe(9_250);
+    expect(row("SELECT COUNT(*) AS count FROM transactions WHERE account_id = ?", account.id).count).toBe(1);
+    const failed = (await getIngestionHistory(20)).find((run) => run.id === failedImportId)!;
+    expect(failed).toMatchObject({ status: "failed", ambiguousCount: 1, errorCount: 0 });
+    expect(failed.items).toEqual([expect.objectContaining({
+      status: "ambiguous", errorCode: "ambiguous_fingerprint",
+      errorSummary: "A similar transaction needs review",
+    })]);
+
+    await expect(ingestTransactions({
+      accountId: account.id, filename: "second.csv", source: "csv", transactions: [source],
+      retryKey: "ambiguous-retry-1",
+    })).rejects.toMatchObject({ status: 409, importId: failedImportId, replayed: true });
+    expect(row("SELECT COUNT(*) AS count FROM imports WHERE retry_key = ?", "ambiguous-retry-1").count).toBe(1);
   });
 });

@@ -25,3 +25,10 @@ meaning another request completed that immutable migration.
 The initial schema intentionally represents version 1. Fresh databases follow
 the same version-by-version path as upgrades, preventing a separate fresh
 schema definition from drifting away from production migrations.
+
+Version 9 adds source-neutral ingestion history. `imports` is the run-level
+record, while `ingestion_items` contains one accepted, duplicate, error, or
+ambiguous outcome for each non-empty source position. The optional retry key is
+unique within an account and source. Run creation, item history, accepted
+transactions, and balance effects are committed together; failed validation or
+ambiguity runs commit audit history only.

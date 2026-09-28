@@ -32,7 +32,20 @@ CSV and future Open Banking adapters normalize into a source-neutral canonical
 ingestion input before writing transactions. The CSV endpoint accepts an
 explicit column mapping, validates every row before it writes anything, and
 keeps a short row-number audit marker only. The ingestion path creates an import
-run and imported transactions in one SQLite batch. The identity hierarchy is
+run, one outcome item per source row, imported transactions, and balance
+changes in one SQLite batch. Completed items are classified as `accepted` or
+`duplicate`. Invalid source rows and conservative fingerprint collisions are
+stored as bounded `error` or `ambiguous` outcomes in a failed run; that batch
+does not insert any transaction or change any balance. Error codes and
+summaries are allow-listed and never contain descriptions, merchant names, raw
+rows, or provider responses. Authenticated clients can inspect the newest runs
+and their items through `GET /api/imports`.
+
+Adapters may supply an explicit retry key. Its account/source-scoped unique
+index makes concurrent and later retries return the original completed or
+failed run instead of applying it again. Corrected source data must use a new
+key. This request-level protection complements per-transaction deduplication.
+The identity hierarchy is
 account-scoped and source-agnostic: a trusted external ID proves a duplicate
 across CSV and Open Banking adapters, while a conservatively normalized
 date/amount/description fingerprint is only a collision signal. Matching

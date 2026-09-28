@@ -20,7 +20,7 @@ available to spend.
 - explicit synthetic demo dataset
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
-- canonical transaction ingestion with a validated CSV adapter and idempotent import runs
+- canonical transaction ingestion with a validated CSV adapter, atomic row-level history, and retry-safe import runs
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
 

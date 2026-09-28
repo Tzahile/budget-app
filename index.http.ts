@@ -19,6 +19,7 @@ import {
   deleteTransaction,
   deactivatePlanned,
   getAppData,
+  getIngestionHistory,
   ingestTransactions,
   reconcileAccount,
   seedDemoData,
@@ -170,11 +171,36 @@ app.post("/api/imports/csv", async (c) => {
   const csv = exactStringField(body, "csv", 500_000);
   const mapping = csvMapping(body.mapping);
   const parsed = parseCsvTransactions(csv, mapping);
-  if (parsed.errors.length) return c.json({ ok: false, errors: parsed.errors }, 422);
+  const filename = stringField(body, "filename", 160);
+  const retryKey = optionalString(body, "retryKey", 200);
+  if (parsed.errors.length) {
+    try {
+      await ingestTransactions({
+        accountId, filename, source: "csv", transactions: parsed.transactions,
+        rowErrors: parsed.rowErrors, retryKey,
+      });
+    } catch (error) {
+      if (Number((error as Error & { status?: number }).status) === 422) {
+        return c.json({
+          ok: false,
+          importId: String((error as Error & { importId?: string }).importId ?? ""),
+          errors: parsed.errors,
+        }, 422);
+      }
+      throw error;
+    }
+  }
   const result = await ingestTransactions({
-    accountId, filename: stringField(body, "filename", 160), source: "csv", transactions: parsed.transactions,
+    accountId, filename, source: "csv", transactions: parsed.transactions, retryKey,
   });
   return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+});
+
+app.get("/api/imports", async (c) => {
+  const rawLimit = c.req.query("limit");
+  const limit = rawLimit == null ? 50 : Number(rawLimit);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ValidationError("limit must be between 1 and 100");
+  return c.json({ imports: await getIngestionHistory(limit) });
 });
 
 app.post("/api/planned", async (c) => {
@@ -264,7 +290,11 @@ app.onError((error, c) => {
   // Error text can contain database/provider context. Keep production logs useful
   // for operational triage without turning them into a financial-data sink.
   if (status >= 500) console.error("BudgetApp request failed", error.name);
-  return c.json({ error: status >= 500 ? "Unexpected server error" : error.message }, status as 400);
+  const importId = (error as Error & { importId?: string }).importId;
+  return c.json({
+    error: status >= 500 ? "Unexpected server error" : error.message,
+    ...(status < 500 && importId ? { importId } : {}),
+  }, status as 400);
 });
 
 function isAuthorized(username: string | null): boolean {
