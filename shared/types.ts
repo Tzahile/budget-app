@@ -77,6 +77,18 @@ export interface IngestionRun {
   items: IngestionRunItem[];
 }
 
+export type IngestedTransferCandidateStatus = "pending" | "deferred" | "confirmed" | "rejected";
+
+export interface IngestedTransferCandidate {
+  id: string;
+  outgoingTransactionId: string;
+  incomingTransactionId: string;
+  status: IngestedTransferCandidateStatus;
+  transferGroupId: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
 export interface PlannedCompletion {
   id: string;
   plannedTransactionId: string;
@@ -177,6 +189,7 @@ export interface AppData {
   accounts: Account[];
   accountReconciliations: AccountReconciliation[];
   transactions: Transaction[];
+  ingestedTransferCandidates: IngestedTransferCandidate[];
   plannedTransactions: PlannedTransaction[];
   plannedCompletions: PlannedCompletion[];
   reserves: Reserve[];
