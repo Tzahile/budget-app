@@ -48,7 +48,7 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(columns("accounts")).toContain("is_demo");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
@@ -82,7 +82,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -161,15 +161,15 @@ describe("database migrations", () => {
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 11,
+      version: 12,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 11 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 12 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   });
 });
 

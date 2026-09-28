@@ -46,6 +46,169 @@ import {
 
 type Row = Record<string, unknown>;
 
+export type BankConnectionStatus = "connected" | "reauth_required" | "disconnected" | "error";
+export interface BankConnection {
+  id: string;
+  provider: string;
+  institutionId: string;
+  institutionName: string;
+  countryCode: string;
+  status: BankConnectionStatus;
+  consentExpiresAt: string | null;
+  lastSyncedAt: string | null;
+  safeErrorCode: string | null;
+  accounts: Array<{ accountId: string }>;
+}
+
+/** Store only a SHA-256 digest of the one-time callback state. */
+export async function hashBankConsentState(state: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(state));
+  return Array.from(new Uint8Array(bytes), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+export async function createBankConsentAttempt(input: {
+  stateHash: string; ownerUsername: string; provider: string; institutionId: string;
+  institutionName: string; providerRequisitionId: string; redirectUri: string; expiresAt: string;
+}): Promise<void> {
+  await ensureSchema();
+  if (!/^[a-f0-9]{64}$/.test(input.stateHash)) throw new Error("Invalid consent state digest");
+  await db.execute({
+    sql: `INSERT INTO bank_consent_attempts (id, state_hash, owner_username, provider, institution_id,
+      institution_name, provider_requisition_id, redirect_uri, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [crypto.randomUUID(), input.stateHash, input.ownerUsername, input.provider, input.institutionId,
+      input.institutionName, input.providerRequisitionId, input.redirectUri, input.expiresAt, new Date().toISOString()],
+  });
+}
+
+/** One atomic claim prevents callback replay, including concurrent requests. */
+export async function consumeBankConsentAttempt(input: {
+  stateHash: string; ownerUsername: string; redirectUri: string;
+}): Promise<{
+  provider: string; institutionId: string; institutionName: string; providerRequisitionId: string;
+} | null> {
+  await ensureSchema();
+  const now = new Date().toISOString();
+  const result = await db.execute({
+    sql: `UPDATE bank_consent_attempts SET consumed_at = ? WHERE state_hash = ? AND owner_username = ?
+      AND redirect_uri = ? AND consumed_at IS NULL AND expires_at > ?`,
+    args: [now, input.stateHash, input.ownerUsername, input.redirectUri, now],
+  });
+  if (!result.rowsAffected) return null;
+  const row = await one("SELECT * FROM bank_consent_attempts WHERE state_hash = ?", [input.stateHash]);
+  if (!row) return null;
+  return {
+    provider: String(row.provider), institutionId: String(row.institution_id),
+    institutionName: String(row.institution_name), providerRequisitionId: String(row.provider_requisition_id),
+  };
+}
+
+export async function createBankConnection(input: {
+  provider: string; providerConnectionId: string; institutionId: string;
+  institutionName: string; countryCode: string; consentExpiresAt?: string | null;
+}): Promise<string> {
+  await ensureSchema();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await db.execute({
+    sql: `INSERT INTO bank_connections (id, provider, provider_connection_id, institution_id,
+      institution_name, country_code, status, consent_expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'connected', ?, ?, ?)`,
+    args: [id, input.provider, input.providerConnectionId, input.institutionId,
+      input.institutionName, input.countryCode, input.consentExpiresAt ?? null, now, now],
+  });
+  return id;
+}
+
+export async function listBankConnections(): Promise<BankConnection[]> {
+  await ensureSchema();
+  const [connections, links] = await Promise.all([
+    db.execute("SELECT * FROM bank_connections ORDER BY created_at DESC"),
+    db.execute("SELECT connection_id, provider_account_id, account_id FROM bank_account_links"),
+  ]);
+  return connections.rows.map((row) => ({
+    id: String(row.id), provider: String(row.provider), institutionId: String(row.institution_id),
+    institutionName: String(row.institution_name), countryCode: String(row.country_code),
+    status: row.status as BankConnectionStatus,
+    consentExpiresAt: row.consent_expires_at === null ? null : String(row.consent_expires_at),
+    lastSyncedAt: row.last_synced_at === null ? null : String(row.last_synced_at),
+    safeErrorCode: row.safe_error_code === null ? null : String(row.safe_error_code),
+    accounts: links.rows.filter((link) => link.connection_id === row.id).map((link) => ({ accountId: String(link.account_id) })),
+  }));
+}
+
+/** Internal provider identifier: never serialize this record into an HTTP response. */
+export async function getBankConnectionForSync(id: string): Promise<{
+  id: string; provider: string; providerConnectionId: string; status: BankConnectionStatus;
+  consentExpiresAt: string | null;
+} | null> {
+  await ensureSchema();
+  const row = await one("SELECT id, provider, provider_connection_id, status, consent_expires_at FROM bank_connections WHERE id = ?", [id]);
+  return row ? {
+    id: String(row.id), provider: String(row.provider), providerConnectionId: String(row.provider_connection_id),
+    status: row.status as BankConnectionStatus,
+    consentExpiresAt: row.consent_expires_at === null ? null : String(row.consent_expires_at),
+  } : null;
+}
+
+/** Create the local account and provider link together; a retry returns the same account. */
+export async function createLinkedBankAccount(input: {
+  connectionId: string; providerAccountId: string; name: string;
+}): Promise<string> {
+  await ensureSchema();
+  if (!input.providerAccountId || input.providerAccountId.length > 200 ||
+      !input.name.trim() || input.name.length > 200) {
+    throw Object.assign(new Error("Invalid bank account details"), { status: 400 });
+  }
+  const connection = await getBankConnectionForSync(input.connectionId);
+  if (!connection || connection.status !== "connected" ||
+      (connection.consentExpiresAt && connection.consentExpiresAt <= new Date().toISOString())) {
+    throw conflict("Bank connection is unavailable");
+  }
+  const accountId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await db.batch([
+    {
+      sql: `INSERT INTO accounts (id, name, type, currency, balance_cents, is_active, created_at, updated_at)
+        SELECT ?, ?, 'checking', 'EUR', 0, 1, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM bank_account_links WHERE connection_id = ? AND provider_account_id = ?)`,
+      args: [accountId, input.name.trim(), now, now,
+        input.connectionId, input.providerAccountId],
+    },
+    {
+      sql: `INSERT INTO bank_account_links (connection_id, provider_account_id, account_id, created_at)
+        SELECT ?, ?, ?, ? WHERE changes() = 1`,
+      args: [input.connectionId, input.providerAccountId, accountId, now],
+    },
+  ]);
+  const link = await one("SELECT account_id FROM bank_account_links WHERE connection_id = ? AND provider_account_id = ?",
+    [input.connectionId, input.providerAccountId]);
+  if (!link) throw conflict("Bank account could not be linked");
+  return String(link.account_id);
+}
+
+export async function markBankConnection(id: string, status: BankConnectionStatus, safeErrorCode?: string | null): Promise<void> {
+  await ensureSchema();
+  if (safeErrorCode && !/^[a-z_]{1,50}$/.test(safeErrorCode)) throw new Error("Invalid safe error code");
+  const result = await db.execute({
+    sql: "UPDATE bank_connections SET status = ?, safe_error_code = ?, updated_at = ? WHERE id = ?",
+    args: [status, safeErrorCode ?? null, new Date().toISOString(), id],
+  });
+  requireChanged(result.rowsAffected, "Bank connection");
+}
+
+export async function linkBankAccount(input: {
+  connectionId: string; providerAccountId: string; accountId: string;
+}): Promise<void> {
+  await ensureSchema();
+  await db.execute({
+    sql: `INSERT INTO bank_account_links (connection_id, provider_account_id, account_id, created_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(connection_id, provider_account_id) DO UPDATE SET
+      account_id = excluded.account_id WHERE account_id = excluded.account_id`,
+    args: [input.connectionId, input.providerAccountId, input.accountId, new Date().toISOString()],
+  });
+}
+
 export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   await ensureSchema();
   const monthStart = `${asOfDate.slice(0, 7)}-01`;
@@ -221,6 +384,9 @@ export async function ingestTransactions(input: {
   transactions: readonly CanonicalTransactionInput[];
   rowErrors?: readonly IngestionRowError[];
   retryKey?: string | null;
+  /** Internal bank sync context; verified by ingestBankAccountTransactions. */
+  bankConnectionId?: string;
+  bankBalanceCents?: number;
 }): Promise<{
   importId: string;
   importedCount: number;
@@ -239,7 +405,7 @@ export async function ingestTransactions(input: {
     if (previous) return replayIngestion(previous);
   }
   const rowErrors = input.rowErrors ?? [];
-  if (!input.transactions.length && !rowErrors.length) {
+  if (!input.transactions.length && !rowErrors.length && input.bankBalanceCents === undefined) {
     throw Object.assign(new Error("No transactions or row errors to record"), { status: 400 });
   }
   const prepared = await prepareCanonicalTransactions({
@@ -247,14 +413,48 @@ export async function ingestTransactions(input: {
   });
   const identities = prepared.map((transaction) => transaction.importIdentity);
   const existing = new Set<string>();
+  const existingRows = new Map<string, Row>();
   for (const values of chunk(identities, 500)) {
     const result = await db.execute({
-      sql: `SELECT import_identity FROM transactions WHERE import_identity IN (${values.map(() => "?").join(", ")})`,
+      sql: `SELECT id, import_identity, account_id, date, amount_cents, description, status,
+        bank_connection_id, transfer_group_id FROM transactions
+        WHERE import_identity IN (${values.map(() => "?").join(", ")})`,
       args: values,
     });
-    for (const row of result.rows) existing.add(String((row as Row).import_identity));
+    for (const row of result.rows) {
+      existing.add(String(row.import_identity));
+      existingRows.set(String(row.import_identity), row);
+    }
   }
   const assessments = assessIngestionDuplicates(prepared, existing);
+  const bankRevisions: Array<{ transaction: typeof prepared[number]; previous: Row }> = [];
+  if (input.bankConnectionId) {
+    const seenBankIdentity = new Map<string, typeof prepared[number]>();
+    for (const assessment of assessments) {
+      const transaction = assessment.transaction;
+      const prior = seenBankIdentity.get(transaction.importIdentity);
+      if (prior && (prior.occurredOn !== transaction.occurredOn || prior.amountCents !== transaction.amountCents ||
+          prior.description !== transaction.description || prior.status !== transaction.status)) {
+        throw conflict("Bank transaction identity has conflicting details");
+      }
+      if (prior) continue;
+      seenBankIdentity.set(transaction.importIdentity, transaction);
+      if (assessment.decision !== "duplicate") continue;
+      const previous = existingRows.get(transaction.importIdentity);
+      if (!previous || previous.account_id !== input.accountId || previous.bank_connection_id !== input.bankConnectionId) {
+        // Cross-source duplicates are safe only if all financial fields agree;
+        // the bank cannot silently rewrite a CSV record or another connection.
+        if (previous && previous.account_id === input.accountId && previous.date === transaction.occurredOn &&
+            Number(previous.amount_cents) === transaction.amountCents && previous.description === transaction.description &&
+            previous.status === transaction.status) continue;
+        throw conflict("Bank transaction identity has conflicting details");
+      }
+      if (previous.date === transaction.occurredOn && Number(previous.amount_cents) === transaction.amountCents &&
+          previous.description === transaction.description && previous.status === transaction.status) continue;
+      if (previous.transfer_group_id !== null) throw conflict("A confirmed transfer needs review before bank revision");
+      bankRevisions.push({ transaction, previous });
+    }
+  }
   const ambiguous = assessments.filter((assessment) => assessment.decision === "ambiguous");
   const importId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -265,6 +465,7 @@ export async function ingestTransactions(input: {
     const plan = rejectedIngestionWritePlan({
       importId, accountId: input.accountId, filename: input.filename, source: input.source,
       transactions: prepared, assessments, rowErrors, errorSummary, retryKey, now,
+      bankConnectionId: input.bankConnectionId,
     });
     const replayed = await writeIngestionPlan(plan.statements, retryKey, input);
     if (replayed) return replayed;
@@ -275,7 +476,7 @@ export async function ingestTransactions(input: {
   }
   const plan = ingestionWritePlan({
     importId, accountId: input.accountId, filename: input.filename, source: input.source,
-    transactions: prepared, assessments, retryKey, now,
+    transactions: prepared, assessments, retryKey, now, bankConnectionId: input.bankConnectionId,
   });
   const eligible = await db.execute(`SELECT id, account_id, date, amount_cents FROM transactions
     WHERE source = 'import' AND status = 'cleared' AND kind IN ('income', 'expense')
@@ -288,13 +489,60 @@ export async function ingestTransactions(input: {
       occurredOn: transaction.occurredOn,
       amountCents: transaction.amountCents,
     }));
+  acceptedForDetection.push(...bankRevisions.filter(({ transaction }) => transaction.status !== "pending").map(({ transaction, previous }) => ({
+    id: String(previous.id), accountId: input.accountId, occurredOn: transaction.occurredOn,
+    amountCents: transaction.amountCents,
+  })));
+  const revisedIds = new Set(bankRevisions.map(({ previous }) => String(previous.id)));
   const existingForDetection: TransferDetectionTransaction[] = eligible.rows.map((row) => ({
     id: String(row.id), accountId: String(row.account_id), occurredOn: String(row.date), amountCents: Number(row.amount_cents),
-  }));
+  })).filter((transaction) => !revisedIds.has(transaction.id));
   plan.statements.push(...insertTransferCandidateStatements({
     pairs: detectIngestedTransferPairs([...existingForDetection, ...acceptedForDetection]),
     now,
   }));
+  if (input.bankConnectionId) {
+    for (const { transaction, previous } of bankRevisions) {
+      plan.statements.push({
+        sql: `UPDATE transactions SET date = ?, amount_cents = ?, description = ?, kind = ?, status = ?,
+          raw_metadata = ?, updated_at = ? WHERE import_identity = ? AND bank_connection_id = ?`,
+        args: [transaction.occurredOn, transaction.amountCents, transaction.description, transaction.kind,
+          transaction.status ?? "cleared", transaction.metadataJson, now, transaction.importIdentity, input.bankConnectionId],
+      });
+      const previousCounted = previous.status === "cleared" ? Number(previous.amount_cents) : 0;
+      const nextCounted = transaction.status === "cleared" ? transaction.amountCents : 0;
+      if (nextCounted !== previousCounted) plan.statements.push({
+        sql: "UPDATE accounts SET balance_cents = balance_cents + ?, updated_at = ?, is_demo = 0 WHERE id = ?",
+        args: [nextCounted - previousCounted, now, input.accountId],
+      });
+    }
+    if (bankRevisions.length) plan.statements.push({
+      sql: "UPDATE imports SET updated_count = ? WHERE id = ?",
+      args: [bankRevisions.length, importId],
+    });
+    if (input.bankBalanceCents !== undefined) {
+      const reconciliationId = crypto.randomUUID();
+      // Provider balance is the authoritative checkpoint after the complete
+      // transaction page has been ingested. This is one SQLite transaction.
+      plan.statements.push({
+        sql: `INSERT INTO account_reconciliations
+          (id, account_id, date, previous_balance_cents, actual_balance_cents, difference_cents, note, created_at)
+          SELECT ?, id, ?, balance_cents, ?, ? - balance_cents, 'Open Banking balance', ?
+          FROM accounts WHERE id = ? AND is_active = 1 AND balance_cents <> ?`,
+        args: [reconciliationId, householdDate(), input.bankBalanceCents, input.bankBalanceCents,
+          now, input.accountId, input.bankBalanceCents],
+      });
+      plan.statements.push({
+        sql: `UPDATE accounts SET balance_cents = ?, updated_at = ?, is_demo = 0
+          WHERE id = ? AND EXISTS (SELECT 1 FROM account_reconciliations WHERE id = ?)`,
+        args: [input.bankBalanceCents, now, input.accountId, reconciliationId],
+      });
+    }
+    plan.statements.push({
+      sql: "UPDATE bank_connections SET last_synced_at = ?, safe_error_code = NULL, updated_at = ? WHERE id = ? AND status = 'connected'",
+      args: [now, now, input.bankConnectionId],
+    });
+  }
   const replayed = await writeIngestionPlan(plan.statements, retryKey, input);
   if (replayed) return replayed;
   return {
@@ -305,6 +553,29 @@ export async function ingestTransactions(input: {
     errorCount: 0,
     replayed: false,
   };
+}
+
+/** A bank account can only sync through its connected, mapped provider link. */
+export async function ingestBankAccountTransactions(input: {
+  connectionId: string; accountId: string; provider: string;
+  transactions: readonly CanonicalTransactionInput[];
+  balanceCents?: number; retryKey?: string;
+}): ReturnType<typeof ingestTransactions> {
+  await ensureSchema();
+  const connected = await one(`SELECT 1 FROM bank_connections c JOIN bank_account_links l
+    ON l.connection_id = c.id JOIN accounts a ON a.id = l.account_id
+    WHERE c.id = ? AND c.provider = ? AND l.account_id = ? AND c.status = 'connected'
+      AND (c.consent_expires_at IS NULL OR c.consent_expires_at > ?)
+      AND a.is_active = 1`, [input.connectionId, input.provider, input.accountId, new Date().toISOString()]);
+  if (!connected) throw conflict("Bank connection is unavailable or account is not linked");
+  if (input.balanceCents !== undefined && !Number.isSafeInteger(input.balanceCents)) {
+    throw Object.assign(new Error("Bank balance must be integer cents"), { status: 400 });
+  }
+  return ingestTransactions({
+    accountId: input.accountId, source: "open_banking", filename: "Open Banking sync",
+    transactions: input.transactions, retryKey: input.retryKey,
+    bankConnectionId: input.connectionId, bankBalanceCents: input.balanceCents,
+  });
 }
 
 export async function getIngestionHistory(limit = 50): Promise<IngestionRun[]> {

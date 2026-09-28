@@ -226,6 +226,52 @@ export const migrations: readonly Migration[] = [
        "CREATE INDEX ingested_transfer_candidates_status_idx ON ingested_transfer_candidates(status, created_at)",
     ],
   },
+  {
+    version: 11,
+    name: "open banking connection and account links",
+    statements: [
+      `CREATE TABLE bank_connections (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        provider_connection_id TEXT NOT NULL,
+        institution_id TEXT NOT NULL,
+        institution_name TEXT NOT NULL,
+        country_code TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('connected', 'reauth_required', 'disconnected', 'error')),
+        consent_expires_at TEXT,
+        last_synced_at TEXT,
+        safe_error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(provider, provider_connection_id)
+      )`,
+      `CREATE TABLE bank_account_links (
+        connection_id TEXT NOT NULL REFERENCES bank_connections(id) ON DELETE CASCADE,
+        provider_account_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(connection_id, provider_account_id),
+        UNIQUE(connection_id, account_id)
+      )`,
+      "CREATE INDEX bank_account_links_account_idx ON bank_account_links(account_id)",
+      `CREATE TABLE bank_consent_attempts (
+        id TEXT PRIMARY KEY,
+        state_hash TEXT NOT NULL UNIQUE,
+        owner_username TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        institution_id TEXT NOT NULL,
+        institution_name TEXT NOT NULL,
+        provider_requisition_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      "ALTER TABLE imports ADD COLUMN bank_connection_id TEXT REFERENCES bank_connections(id) ON DELETE SET NULL",
+      "ALTER TABLE imports ADD COLUMN updated_count INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE transactions ADD COLUMN bank_connection_id TEXT REFERENCES bank_connections(id) ON DELETE SET NULL",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

@@ -1,7 +1,7 @@
 /** @jsxImportSource https://esm.sh/react@18.2.0 */
 import { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@18.2.0";
 import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/react@18.2.0";
-import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedCompletion, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
+import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type BankConnectionsResponse, type PlannedCompletion, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
 import { householdDate } from "../../shared/finance.ts";
 
 type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
@@ -112,13 +112,16 @@ export function App() {
       <main className="mx-auto max-w-6xl px-4 py-6 pb-20 sm:px-6 sm:py-10">
         {error && <div role="alert" className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss">×</button></div>}
         {data.accounts.length === 0 ? (
-          <EmptyStart
-            busy={busy}
-            canCleanupDemo={canCleanupDemoData(data.demoDataState)}
-            onDemo={() => mutate("/api/demo", "POST")}
-            onAccount={() => setEditor({ type: "account" })}
-            onCleanupDemo={cleanupDemo}
-          />
+          <>
+            <EmptyStart
+              busy={busy}
+              canCleanupDemo={canCleanupDemoData(data.demoDataState)}
+              onDemo={() => mutate("/api/demo", "POST")}
+              onAccount={() => setEditor({ type: "account" })}
+              onCleanupDemo={cleanupDemo}
+            />
+            <BankConnections onAction={mutate} />
+          </>
         ) : view === "overview" ? (
           <Overview
             data={data}
@@ -136,7 +139,7 @@ export function App() {
         ) : view === "reserves" ? (
           <Reserves data={data} onAdd={() => setEditor({ type: "reserve" })} onEdit={(item) => setEditor({ type: "reserve", item })} onDelete={(id) => confirmed("Delete this reserve?") && mutate(`/api/reserves/${id}`, "DELETE")} />
         ) : (
-          <Accounts data={data} onAdd={() => setEditor({ type: "account" })} onEdit={(item) => setEditor({ type: "account", item })} onReconcile={(item) => setEditor({ type: "reconciliation", item })} onDelete={(id) => confirmed("Delete this empty account?") && mutate(`/api/accounts/${id}`, "DELETE")} />
+          <Accounts data={data} onAdd={() => setEditor({ type: "account" })} onEdit={(item) => setEditor({ type: "account", item })} onReconcile={(item) => setEditor({ type: "reconciliation", item })} onDelete={(id) => confirmed("Delete this empty account?") && mutate(`/api/accounts/${id}`, "DELETE")} onBankAction={mutate} />
         )}
       </main>
 
@@ -304,9 +307,54 @@ function Reserves({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () 
   return <Page title="Protected reserves" subtitle="Protect money now, or set a target and deadline to calculate this month's contribution." action="Add reserve" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2">{data.reserves.length === 0 ? <Card><EmptyLine>No reserves yet.</EmptyLine></Card> : data.reserves.map((item) => { const progress = item.targetAmountCents == null ? 0 : Math.min(100, item.fundedAmountCents / item.targetAmountCents * 100); const linked = item.linkedPlannedTransactionId ? planned[item.linkedPlannedTransactionId] : undefined; return <Card key={item.id} inactive={!item.isActive}><div className="flex items-start justify-between gap-4"><div><h3 className="font-semibold">{item.name}</h3><p className="mt-1 text-sm text-stone-500">{item.note || "Protected funds"}</p>{linked && <p className="mt-1 text-xs text-stone-400">Linked to {linked.description} · due {prettyDate(linked.nextDate)}{!linked.isActive ? " · inactive" : ""}</p>}</div><p className="text-xl font-semibold">{money(item.fundedAmountCents)}</p></div>{item.targetAmountCents != null && item.targetDate && <div className="mt-4"><div className="flex justify-between text-xs text-stone-500"><span>{Math.floor(progress)}% funded</span><span>Goal {money(item.targetAmountCents)} by {prettyDate(item.targetDate)}</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-stone-100"><div className="h-full rounded-full bg-green-700" style={{ width: `${progress}%` }} /></div><p className="mt-3 text-sm font-medium text-green-800">{!item.isActive ? "Inactive goal" : item.requiredContributionCents > 0 ? `Still protect ${money(item.requiredContributionCents)} this month` : item.fundedAmountCents >= item.targetAmountCents ? "Goal funded" : "This month's contribution is funded"}</p></div>}<div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton><SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>; })}</div></Page>;
 }
 
-function Accounts({ data, onAdd, onEdit, onReconcile, onDelete }: { data: AppData; onAdd: () => void; onEdit: (item: Account) => void; onReconcile: (item: Account) => void; onDelete: (id: string) => void }) {
+function Accounts({ data, onAdd, onEdit, onReconcile, onDelete, onBankAction }: { data: AppData; onAdd: () => void; onEdit: (item: Account) => void; onReconcile: (item: Account) => void; onDelete: (id: string) => void; onBankAction: (path: string, method: string) => Promise<void> }) {
   const accounts = useMemo(() => Object.fromEntries(data.accounts.map((account) => [account.id, account.name])), [data.accounts]);
-  return <Page title="Accounts" subtitle="Balances are current cleared amounts. Use reconciliation to align one with the bank." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton>{item.isActive && <SmallButton primary onClick={() => onReconcile(item)}>Reconcile</SmallButton>}<SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div>{data.accountReconciliations.length > 0 && <section className="mt-8"><SectionTitle title="Reconciliation history" subtitle="Balance checkpoints retained for audit" /><div className="mt-3 divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.accountReconciliations.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 py-4"><div className="min-w-0 flex-1"><p className="font-medium">{accounts[item.accountId] ?? "Unknown account"}</p><p className="text-xs text-stone-400">{prettyDate(item.date)} · {money(item.previousBalanceCents)} → {money(item.actualBalanceCents)}{item.note ? ` · ${item.note}` : ""}</p></div><Amount cents={item.differenceCents} /></div>)}</div></section>}</Page>;
+  return <Page title="Accounts" subtitle="Balances are current cleared amounts. Use reconciliation to align one with the bank." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton>{item.isActive && <SmallButton primary onClick={() => onReconcile(item)}>Reconcile</SmallButton>}<SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div><BankConnections onAction={onBankAction} />{data.accountReconciliations.length > 0 && <section className="mt-8"><SectionTitle title="Reconciliation history" subtitle="Balance checkpoints retained for audit" /><div className="mt-3 divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.accountReconciliations.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 py-4"><div className="min-w-0 flex-1"><p className="font-medium">{accounts[item.accountId] ?? "Unknown account"}</p><p className="text-xs text-stone-400">{prettyDate(item.date)} · {money(item.previousBalanceCents)} → {money(item.actualBalanceCents)}{item.note ? ` · ${item.note}` : ""}</p></div><Amount cents={item.differenceCents} /></div>)}</div></section>}</Page>;
+}
+
+function BankConnections({ onAction }: { onAction: (path: string, method: string) => Promise<void> }) {
+  const [result, setResult] = useState<BankConnectionsResponse | null>(null);
+  const [institutionId, setInstitutionId] = useState("");
+  const [error, setError] = useState("");
+  const [working, setWorking] = useState<string | null>(null);
+  const refresh = useCallback(async () => setResult(await api<BankConnectionsResponse>("/api/bank/connections")), []);
+  useEffect(() => { refresh().catch((err) => setError(messageOf(err))); }, [refresh]);
+  const act = async (id: string, method: "POST" | "DELETE") => {
+    if (method === "DELETE" && !confirmed("Disconnect this bank? Imported transactions will remain in your history.")) return;
+    setWorking(id);
+    setError("");
+    try {
+      await onAction(`/api/bank/connections/${encodeURIComponent(id)}${method === "POST" ? "/sync" : ""}`, method);
+      await refresh();
+    } catch (err) { setError(messageOf(err)); }
+    finally { setWorking(null); }
+  };
+  const connect = async (id: string) => {
+    if (!result?.available || !result.institutions?.some((institution) => institution.id === id)) return;
+    setWorking("connect");
+    setError("");
+    try {
+      const response = await api<{ authorizationUrl: string }>("/api/bank/connect", { method: "POST", body: JSON.stringify({ institutionId: id }) });
+      const destination = new URL(response.authorizationUrl);
+      if (destination.protocol !== "https:" || destination.username || destination.password) throw new Error("Invalid bank authorization address");
+      window.location.assign(destination.href);
+    } catch (err) { setError(messageOf(err)); setWorking(null); }
+  };
+  return <section className="mt-8 rounded-2xl border border-stone-200 bg-white p-5" aria-label="Bank connections">
+    <SectionTitle title="Bank connections" subtitle="Read-only account and transaction sync" />
+    {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
+    {!result ? <p className="mt-3 text-sm text-stone-500">{error ? "Could not load bank connections." : "Loading bank connections…"}</p> : <>
+      {!result.available && <p className="mt-3 text-sm text-amber-800">{result.reason || "Bank connection is unavailable until a supported provider is verified and configured."}</p>}
+      {result.available && result.institutions && result.institutions.length > 0 && <div className="mt-4 flex flex-wrap items-end gap-2"><label className="text-sm text-stone-600">Bank institution<select className="mt-1 block rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm" value={institutionId || result.institutions[0].id} onChange={(event) => setInstitutionId(event.currentTarget.value)}>{result.institutions.map((institution) => <option key={institution.id} value={institution.id}>{institution.name}</option>)}</select></label><Button disabled={working !== null} onClick={() => void connect(institutionId || result.institutions![0].id)}>Connect bank</Button></div>}
+      {result.available && (!result.institutions || result.institutions.length === 0) && <p className="mt-3 text-sm text-stone-500">No supported bank institution is currently available.</p>}
+      {result.available && result.connections.length === 0 && <p className="mt-3 text-sm text-stone-500">No bank is connected.</p>}
+      {result.connections.length > 0 && <div className="mt-3 divide-y divide-stone-100">{result.connections.map((connection) => <div key={connection.id} className="flex flex-wrap items-start justify-between gap-3 py-4">
+        <div><p className="font-medium">{connection.institutionName}</p><p className="mt-1 text-xs text-stone-500">{connection.provider} · {connection.status.replaceAll("_", " ")}{connection.lastSyncedAt ? ` · Last sync ${new Date(connection.lastSyncedAt).toLocaleString("en-GB")}` : ""}{connection.expiresAt ? ` · Consent expires ${new Date(connection.expiresAt).toLocaleDateString("en-GB")}` : ""}</p>
+          <p className="mt-1 text-xs text-stone-500">{connection.accounts.map((account) => account.name).join(", ") || "No mapped accounts"}</p>{connection.lastError && <p className="mt-1 text-sm text-amber-800">{connection.lastError}</p>}</div>
+        <div className="flex gap-2">{connection.status === "reauth_required" && result.available && result.institutions?.some((institution) => institution.id === connection.institutionId) && <SmallButton onClick={() => void connect(connection.institutionId)} disabled={working !== null}>Reconnect</SmallButton>}<SmallButton onClick={() => void act(connection.id, "POST")} disabled={working !== null || connection.status !== "connected"}>Sync now</SmallButton><SmallButton onClick={() => void act(connection.id, "DELETE")} disabled={working !== null}>Disconnect</SmallButton></div>
+      </div>)}</div>}
+    </>}
+  </section>;
 }
 
 function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNullable<Editor>; data: AppData; busy: boolean; onClose: () => void; onSave: (payload: unknown) => Promise<void> }) {
