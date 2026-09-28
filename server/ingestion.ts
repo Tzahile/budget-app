@@ -64,6 +64,7 @@ export interface IngestionWriteInput {
   transactions: PreparedIngestionTransaction[];
   assessments: readonly IngestionDuplicateAssessment[];
   retryKey?: string | null;
+  bankConnectionId?: string | null;
 }
 
 export interface IngestionWritePlan {
@@ -167,10 +168,10 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
   const statements: MigrationStatement[] = [{
     sql: `INSERT INTO imports
       (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
-       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at)
-      VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, 0, 0, NULL, ?, ?, NULL)`,
+       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at, bank_connection_id)
+      VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, 0, 0, NULL, ?, ?, NULL, ?)`,
     args: [input.importId, input.filename, input.source, input.accountId, input.transactions.length,
-      input.retryKey ?? null, input.now],
+      input.retryKey ?? null, input.now, input.bankConnectionId ?? null],
   }];
   for (const transaction of imported) {
     statements.push({
@@ -178,11 +179,11 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
       // a concurrent retry from applying a balance update after INSERT IGNORE.
       sql: `INSERT OR IGNORE INTO transactions
         (id, account_id, date, amount_cents, currency, description, kind, status, source,
-         external_id, import_identity, raw_metadata, created_at, updated_at, is_demo)
-        VALUES (?, ?, ?, ?, 'EUR', ?, ?, ?, 'import', ?, ?, ?, ?, ?, 0)`,
+         external_id, import_identity, raw_metadata, created_at, updated_at, is_demo, bank_connection_id)
+        VALUES (?, ?, ?, ?, 'EUR', ?, ?, ?, 'import', ?, ?, ?, ?, ?, 0, ?)`,
       args: [transaction.id, input.accountId, transaction.occurredOn, transaction.amountCents, transaction.description,
         transaction.kind, transaction.status ?? "cleared", transaction.externalId ?? null, transaction.importIdentity,
-        transaction.metadataJson, input.now, input.now],
+        transaction.metadataJson, input.now, input.now, input.bankConnectionId ?? null],
     });
     if (transaction.status !== "pending") {
       statements.push({
@@ -229,13 +230,13 @@ export function rejectedIngestionWritePlan(input: IngestionWriteInput & {
   const statements: MigrationStatement[] = [{
     sql: `INSERT INTO imports
       (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
-       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at)
-      VALUES (?, ?, ?, ?, 'failed', ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at, bank_connection_id)
+      VALUES (?, ?, ?, ?, 'failed', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [input.importId, input.filename, input.source, input.accountId, positions.size,
       input.assessments.filter((value) => value.decision === "duplicate").length,
       input.assessments.filter((value) => value.decision === "ambiguous").length,
       input.rowErrors.length + input.assessments.filter((value) => value.decision === "accepted").length,
-      input.errorSummary, input.retryKey ?? null, input.now, input.now],
+      input.errorSummary, input.retryKey ?? null, input.now, input.now, input.bankConnectionId ?? null],
   }];
   for (const sourcePosition of [...positions].sort((a, b) => a - b)) {
     const rowError = rowErrorsByPosition.get(sourcePosition);

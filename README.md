@@ -22,8 +22,8 @@ available to spend.
 - pure financial calculation tests
 - canonical transaction ingestion with a validated CSV adapter, atomic row-level history, and retry-safe import runs
 - explicit review of detected owned-account transfers from imported transactions
-- documented provider-neutral Open Banking architecture, consent boundary, and
-  BBVA Italy coverage verification gate
+- read-only Open Banking adapter, consent state, manual sync and reconciliation
+  foundation; live BBVA Italy connection remains gated on provider verification
 
 All persisted money uses integer EUR cents. See
 [`docs/financial-semantics.md`](docs/financial-semantics.md) for the exact
@@ -32,6 +32,9 @@ for schema-change conventions,
 [`docs/open-banking-architecture.md`](docs/open-banking-architecture.md) for
 the Open Banking integration boundary, and [`ROADMAP.md`](ROADMAP.md) for
 remaining Open Banking and React Native work.
+See [`docs/open-banking-operations.md`](docs/open-banking-operations.md) for
+provider setup and recovery. The code does not claim that BBVA Italy is
+currently supported by the candidate provider.
 
 ## Local checks
 

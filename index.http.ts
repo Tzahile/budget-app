@@ -33,6 +33,7 @@ import {
   decideIngestedTransferCandidate,
 } from "./server/repository.ts";
 import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { bankConnectionsResponse, beginBankConsent, completeBankConsent, disconnectBankConnection, syncBankConnection } from "./server/bank-service.ts";
 import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import {
@@ -85,6 +86,39 @@ app.get("/api/data", async (c) => {
   const asOf = c.req.query("asOf") || householdDate();
   assertDateOnly(asOf);
   return c.json(await getAppData(asOf));
+});
+
+app.get("/api/bank/connections", async (c) => c.json(await bankConnectionsResponse()));
+
+app.post("/api/bank/connect", async (c) => {
+  const session = await getOAuthUserData(c.req.raw);
+  const body = await readBody(c.req.raw);
+  return c.json(await beginBankConsent({
+    institutionId: stringField(body, "institutionId", 128),
+    ownerUsername: session!.user!.username!,
+    origin: new URL(c.req.url).origin,
+  }), 201);
+});
+
+// The provider returns by top-level navigation. One-time state binds the
+// callback to the same authenticated username and exact redirect URI.
+app.get("/api/bank/callback", async (c) => {
+  const session = await getOAuthUserData(c.req.raw);
+  await completeBankConsent({
+    state: c.req.query("state") ?? "",
+    ownerUsername: session!.user!.username!,
+    origin: new URL(c.req.url).origin,
+  });
+  return c.redirect("/?bank=connected");
+});
+
+app.post("/api/bank/connections/:id/sync", async (c) => c.json({
+  ok: true, ...(await syncBankConnection(safeId(c.req.param("id")))),
+}));
+
+app.delete("/api/bank/connections/:id", async (c) => {
+  await disconnectBankConnection(safeId(c.req.param("id")));
+  return c.body(null, 204);
 });
 
 app.post("/api/accounts", async (c) => {

@@ -86,4 +86,24 @@ describe("Hono financial API security integration", () => {
     expect(JSON.stringify(history)).not.toContain("Private merchant text");
     expect((await request("/api/imports", {}, null)).status).toBe(401);
   });
+
+  it("keeps bank consent unavailable without verified provider configuration and rejects callback replay", async () => {
+    const response = await request("/api/bank/connections");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { available: boolean; connections: unknown[]; reason: string };
+    expect(body.available).toBe(false);
+    expect(body.connections).toEqual([]);
+    expect(body.reason).toMatch(/not been verified/);
+    expect((await request("/api/bank/connections", {}, null)).status).toBe(401);
+
+    const connect = await request("/api/bank/connect", {
+      method: "POST",
+      headers: { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ institutionId: "unverified-bank" }),
+    });
+    expect(connect.status).toBe(503);
+    expect(await connect.json()).toEqual({ error: "Unexpected server error" });
+    expect((await request("/api/bank/callback?state=invalid")).status).toBe(400);
+    expect((await request("/api/bank/callback?state=invalid", {}, null)).status).toBe(401);
+  });
 });
