@@ -21,6 +21,26 @@ function request(path: string, init: RequestInit = {}, user: string | null = "tz
 }
 
 describe("Hono financial API security integration", () => {
+  it("accepts positive manual refunds and rejects invalid kinds or amounts on create and edit", async () => {
+    const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+    const accountResponse = await request("/api/accounts", { method: "POST", headers,
+      body: JSON.stringify({ name: "Synthetic API refund account", type: "checking", balanceCents: 10_000 }) });
+    expect(accountResponse.status).toBe(201);
+    const accounts = await (await request("/api/data?asOf=2026-12-31")).json() as { accounts: Array<{ id: string; name: string }> };
+    const accountId = accounts.accounts.find((item) => item.name === "Synthetic API refund account")!.id;
+    const body = { accountId, date: "2026-12-31", description: "Synthetic API refund", amountCents: 1_000, kind: "refund" };
+    expect((await request("/api/transactions", { method: "POST", headers, body: JSON.stringify(body) })).status).toBe(201);
+    const snapshot = await (await request("/api/data?asOf=2026-12-31")).json() as { transactions: Array<{ id: string; description: string }> };
+    const id = snapshot.transactions.find((item) => item.description === body.description)!.id;
+    expect((await request(`/api/transactions/${id}`, { method: "PUT", headers,
+      body: JSON.stringify({ ...body, amountCents: 2_000 }) })).status).toBe(200);
+    for (const invalid of [{ ...body, kind: "transfer" }, { ...body, kind: "bogus" }, { ...body, amountCents: -1_000 }, { ...body, amountCents: 0 }]) {
+      expect((await request("/api/transactions", { method: "POST", headers, body: JSON.stringify(invalid) })).status).toBe(400);
+      expect((await request(`/api/transactions/${id}`, { method: "PUT", headers, body: JSON.stringify(invalid) })).status).toBe(400);
+    }
+    expect((await request(`/api/transactions/${id}`, { method: "DELETE", headers })).status).toBe(204);
+  });
+
   it("enforces authentication, allowlisting, mutation origin, and JSON boundaries before repository access", async () => {
     expect((await request("/api/data", {}, null)).status).toBe(401);
     expect((await request("/api/data", {}, "not-allowed")).status).toBe(403);

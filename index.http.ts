@@ -129,7 +129,7 @@ app.post("/api/transactions", async (c) => {
     date: dateField(body, "date"),
     amountCents: centsField(body),
     description: stringField(body, "description", 160),
-    kind: enumField(body, "kind", ["income", "expense"] as const),
+    kind: enumField(body, "kind", ["income", "expense", "refund"] as const),
   });
   return c.json({ ok: true }, 201);
 });
@@ -141,7 +141,7 @@ app.put("/api/transactions/:id", async (c) => {
     date: dateField(body, "date"),
     amountCents: centsField(body),
     description: stringField(body, "description", 160),
-    kind: enumField(body, "kind", ["income", "expense"] as const),
+    kind: enumField(body, "kind", ["income", "expense", "refund"] as const),
   });
   return c.json({ ok: true });
 });
