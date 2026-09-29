@@ -48,7 +48,7 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(columns("accounts")).toContain("is_demo");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
@@ -83,7 +83,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -96,6 +96,25 @@ describe("database migrations", () => {
 
     expect(sqlite.prepare("SELECT version, applied_at FROM schema_migrations ORDER BY version").all())
       .toEqual(migrations.map((migration) => ({ version: migration.version, applied_at: appliedAt })));
+  });
+
+  it("preserves existing CSV and Open Banking history while widening the source constraint", async () => {
+    await migrateDatabase(database, migrations.slice(0, 11), () => appliedAt);
+    sqlite.prepare(`INSERT INTO accounts (id, name, type, balance_cents, created_at, updated_at)
+      VALUES ('account-a', 'Synthetic', 'checking', 0, ?, ?)`).run(appliedAt, appliedAt);
+    sqlite.prepare(`INSERT INTO imports
+      (id, filename, status, source, account_id, created_at, retry_key)
+      VALUES ('import-old', 'provider', 'completed', 'open_banking', 'account-a', ?, 'retry-old')`).run(appliedAt);
+    sqlite.prepare(`INSERT INTO ingestion_items
+      (id, import_id, source_position, status, created_at)
+      VALUES ('item-old', 'import-old', 2, 'accepted', ?)`).run(appliedAt);
+    await migrateDatabase(database, migrations, () => appliedAt);
+    expect(sqlite.prepare("SELECT source, retry_key FROM imports WHERE id = 'import-old'").get())
+      .toMatchObject({ source: "open_banking", retry_key: "retry-old" });
+    expect(sqlite.prepare("SELECT import_id FROM ingestion_items WHERE id = 'item-old'").get())
+      .toMatchObject({ import_id: "import-old" });
+    sqlite.prepare(`INSERT INTO imports (id, filename, status, source, account_id, created_at)
+      VALUES ('import-new', 'synthetic.xlsx', 'completed', 'xlsx', 'account-a', ?)`).run(appliedAt);
   });
 
   it("upgrades existing reserves to optional goals without changing funded money", async () => {
@@ -162,15 +181,15 @@ describe("database migrations", () => {
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 12,
+      version: 13,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 12 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 13 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 });
 

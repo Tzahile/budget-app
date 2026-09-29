@@ -33,6 +33,7 @@ import {
   decideIngestedTransferCandidate,
 } from "./server/repository.ts";
 import { csvHeaders, parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { readXlsxWorkbook, parseXlsxSheet } from "./server/xlsx.ts";
 import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile } from "./server/csv-profiles.ts";
 import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
@@ -184,6 +185,19 @@ app.post("/api/imports/csv/preview", async (c) => {
   return c.json({ headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
 });
 
+app.post("/api/imports/xlsx/preview", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
+  const workbook = await xlsxWorkbook(body);
+  const sheet = body.sheet == null ? workbook.sheets[0]?.name : stringField(body, "sheet", 31);
+  const headers = workbook.sheets.find((entry) => entry.name === sheet)?.headers;
+  if (!headers) throw new ValidationError("XLSX sheet was not found");
+  if (!body.mapping) return c.json({ sheets: workbook.sheets.map(({ name }) => name), sheet, headers });
+  let parsed;
+  try { parsed = parseXlsxSheet(workbook, sheet, csvMapping(body.mapping)); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX mapping is invalid"); }
+  return c.json({ sheets: workbook.sheets.map(({ name }) => name), sheet, headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
+});
+
 app.get("/api/imports/csv/profiles", async (c) => c.json({ profiles: await listCsvMappingProfiles() }));
 app.post("/api/imports/csv/profiles", async (c) => {
   const body = await readBody(c.req.raw);
@@ -228,6 +242,31 @@ app.post("/api/imports/csv", async (c) => {
   const result = await ingestTransactions({
     accountId, filename, source: "csv", transactions: parsed.transactions, retryKey,
   });
+  return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+});
+
+app.post("/api/imports/xlsx", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
+  const accountId = safeId(stringField(body, "accountId", 64));
+  const workbook = await xlsxWorkbook(body);
+  const sheet = stringField(body, "sheet", 31);
+  const mapping = csvMapping(body.mapping);
+  let parsed;
+  try { parsed = parseXlsxSheet(workbook, sheet, mapping); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX mapping is invalid"); }
+  const filename = stringField(body, "filename", 160);
+  const retryKey = optionalString(body, "retryKey", 200);
+  if (parsed.errors.length) {
+    try {
+      await ingestTransactions({ accountId, filename, source: "xlsx", transactions: parsed.transactions, rowErrors: parsed.rowErrors, retryKey });
+    } catch (error) {
+      if (Number((error as Error & { status?: number }).status) === 422) {
+        return c.json({ ok: false, importId: String((error as Error & { importId?: string }).importId ?? ""), errors: parsed.errors }, 422);
+      }
+      throw error;
+    }
+  }
+  const result = await ingestTransactions({ accountId, filename, source: "xlsx", transactions: parsed.transactions, retryKey });
   return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
 });
 
@@ -374,6 +413,12 @@ function csvMapping(value: unknown): CsvColumnMapping {
     dateFormat: mapping.dateFormat == null ? undefined : enumField(mapping, "dateFormat", ["iso", "day_first", "month_first"] as const),
     decimalSeparator: mapping.decimalSeparator == null ? undefined : enumField(mapping, "decimalSeparator", [",", "."] as const),
   };
+}
+
+async function xlsxWorkbook(body: Record<string, unknown>) {
+  const base64 = exactStringField(body, "xlsx", 670_000);
+  try { return await readXlsxWorkbook(base64); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX file is invalid"); }
 }
 
 function plannedInput(body: Record<string, unknown>) {
