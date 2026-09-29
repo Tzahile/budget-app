@@ -3,6 +3,7 @@ import {
   assessIngestionDuplicates,
   canonicalImportIdentity,
   ingestionWritePlan,
+  csvHeaders,
   parseCsvTransactions,
   prepareCanonicalTransactions,
   rejectedIngestionWritePlan,
@@ -17,6 +18,26 @@ describe("CSV canonical ingestion adapter", () => {
     await expect(prepareCanonicalTransactions({ source: "open_banking", accountId: "account-a", transactions: [{ ...base, amountCents: -1_000, kind: "refund" }] })).rejects.toThrow("kind does not match amount sign");
   });
 
+  it("maps debit/credit layouts with exact cents and explicit month-first dates", () => {
+    const quoted = parseCsvTransactions(
+      'Date,Debit,Credit,Details,Reference\n09/16/2026,"1,234.56",,Synthetic purchase,d-1\n09/17/2026,,2.00,Synthetic refund,c-1\n09/18/2026,3.00,4.00,Invalid,both\n',
+      { date: "Date", debit: "Debit", credit: "Credit", description: "Details", externalId: "Reference", dateFormat: "month_first", decimalSeparator: "." },
+    );
+    expect(quoted.transactions.map(({ occurredOn, amountCents, externalId }) => ({ occurredOn, amountCents, externalId }))).toEqual([
+      { occurredOn: "2026-09-16", amountCents: -123456, externalId: "d-1" },
+      { occurredOn: "2026-09-17", amountCents: 200, externalId: "c-1" },
+    ]);
+    expect(quoted.rowErrors).toEqual([{ sourcePosition: 4, code: "invalid_amount", summary: "Amount is invalid" }]);
+    expect(csvHeaders('Date,Debit,Credit,Details\n2026-09-16,1,,Synthetic\n')).toEqual(["Date", "Debit", "Credit", "Details"]);
+  });
+
+  it("validates required, distinct and optional mapped columns", () => {
+    const csv = "Date,Amount,Details\n2026-09-16,12.50,Synthetic\n";
+    expect(() => parseCsvTransactions(csv, { date: "Date", amount: "Amount", description: "Date" })).toThrow("distinct");
+    expect(() => parseCsvTransactions(csv, { date: "Date", amount: "Amount", description: "Details", externalId: "Missing" })).toThrow("not found");
+    expect(parseCsvTransactions(csv, { date: "Date", amount: "Amount", description: "Details", decimalSeparator: "." }).transactions[0].amountCents).toBe(1250);
+    expect(parseCsvTransactions("Date;Amount;Details\n16/09/2026;1.234,56;Synthetic\n", { date: "Date", amount: "Amount", description: "Details", decimalSeparator: "," }).transactions[0].amountCents).toBe(123456);
+  });
   it("normalizes quoted semicolon CSV values and Italian amounts before persistence", () => {
     const result = parseCsvTransactions(
       'Data;Importo;Descrizione;ID;Stato\n16/09/2026;-12,34;"Groceries; family";bank-123;Eseguito\n',

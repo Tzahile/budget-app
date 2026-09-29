@@ -1,8 +1,8 @@
 import { db, ensureSchema } from "./db.ts";
 
 /** A backup is a versioned data artifact, not a raw database or provider dump. */
-export const BACKUP_FORMAT_VERSION = 1;
-export const BACKUP_SCHEMA_VERSION = 10;
+export const BACKUP_FORMAT_VERSION = 2;
+export const BACKUP_SCHEMA_VERSION = 11;
 
 // Review these projections and increment the format version when the schema
 // changes. In particular, never export tokens, raw provider payloads, or
@@ -17,6 +17,7 @@ export const BACKUP_TABLES = {
   imports: "id, filename, status, row_count, imported_count, duplicate_count, error_summary, created_at, completed_at, source, account_id, ambiguous_count, error_count",
   ingestion_items: "id, import_id, source_position, status, transaction_id, import_identity, error_code, error_summary, created_at",
   ingested_transfer_candidates: "id, outgoing_transaction_id, incoming_transaction_id, status, created_at, decided_at, transfer_group_id",
+  csv_mapping_profiles: "id, name, mapping_json, created_at, updated_at",
 } as const;
 
 export type BackupTable = keyof typeof BACKUP_TABLES;

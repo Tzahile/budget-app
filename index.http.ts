@@ -32,8 +32,9 @@ import {
   deleteTransfer,
   decideIngestedTransferCandidate,
 } from "./server/repository.ts";
-import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
-import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
+import { csvHeaders, parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile } from "./server/csv-profiles.ts";
+import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import { exportBackup } from "./server/backup.ts";
 import {
@@ -174,8 +175,33 @@ app.delete("/api/transfers/:id", async (c) => {
   return c.body(null, 204);
 });
 
-app.post("/api/imports/csv", async (c) => {
+app.post("/api/imports/csv/preview", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
+  const csv = exactStringField(body, "csv", 500_000);
+  const headers = csvHeaders(csv);
+  if (!body.mapping) return c.json({ headers });
+  const parsed = parseCsvTransactions(csv, csvMapping(body.mapping));
+  return c.json({ headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
+});
+
+app.get("/api/imports/csv/profiles", async (c) => c.json({ profiles: await listCsvMappingProfiles() }));
+app.post("/api/imports/csv/profiles", async (c) => {
   const body = await readBody(c.req.raw);
+  const id = await saveCsvMappingProfile(stringField(body, "name", 80), csvMapping(body.mapping));
+  return c.json({ id }, 201);
+});
+app.put("/api/imports/csv/profiles/:id", async (c) => {
+  const body = await readBody(c.req.raw);
+  await saveCsvMappingProfile(stringField(body, "name", 80), csvMapping(body.mapping), safeId(c.req.param("id")));
+  return c.json({ ok: true });
+});
+app.delete("/api/imports/csv/profiles/:id", async (c) => {
+  await deleteCsvMappingProfile(safeId(c.req.param("id")));
+  return c.body(null, 204);
+});
+
+app.post("/api/imports/csv", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
   const accountId = safeId(stringField(body, "accountId", 64));
   const csv = exactStringField(body, "csv", 500_000);
   const mapping = csvMapping(body.mapping);
@@ -335,12 +361,18 @@ function safeId(value: string): string {
 
 function csvMapping(value: unknown): CsvColumnMapping {
   const mapping = objectBody(value);
+  const amount = optionalString(mapping, "amount", 100) ?? undefined;
+  const debit = optionalString(mapping, "debit", 100) ?? undefined;
+  const credit = optionalString(mapping, "credit", 100) ?? undefined;
+  if (!(amount || (debit && credit)) || (amount && (debit || credit))) throw new ValidationError("Map an amount column or both debit and credit columns");
   return {
     date: stringField(mapping, "date", 100),
-    amount: stringField(mapping, "amount", 100),
+    amount, debit, credit,
     description: stringField(mapping, "description", 100),
     externalId: optionalString(mapping, "externalId", 100) ?? undefined,
     status: optionalString(mapping, "status", 100) ?? undefined,
+    dateFormat: mapping.dateFormat == null ? undefined : enumField(mapping, "dateFormat", ["iso", "day_first", "month_first"] as const),
+    decimalSeparator: mapping.decimalSeparator == null ? undefined : enumField(mapping, "decimalSeparator", [",", "."] as const),
   };
 }
 

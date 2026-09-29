@@ -226,6 +226,19 @@ export const migrations: readonly Migration[] = [
        "CREATE INDEX ingested_transfer_candidates_status_idx ON ingested_transfer_candidates(status, created_at)",
     ],
   },
+  {
+    version: 11,
+    name: "CSV mapping profiles",
+    statements: [
+      `CREATE TABLE csv_mapping_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        mapping_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+    ],
+  },
 ];
 
 export async function migrateDatabase(

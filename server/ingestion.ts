@@ -19,10 +19,14 @@ export interface CanonicalTransactionInput {
 
 export interface CsvColumnMapping {
   date: string;
-  amount: string;
+  amount?: string;
+  debit?: string;
+  credit?: string;
   description: string;
   externalId?: string;
   status?: string;
+  dateFormat?: "iso" | "day_first" | "month_first";
+  decimalSeparator?: "," | ".";
 }
 
 export interface CsvParseResult {
@@ -91,16 +95,24 @@ export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): Cs
   if (rows.length < 2) throw new Error("CSV must contain a header and at least one data row");
   if (rows.length - 1 > maxRows) throw new Error(`CSV contains more than ${maxRows} rows`);
   const headers = rows[0].map(normalizeHeader);
+  if (headers.some((header) => !header) || new Set(headers).size !== headers.length) throw new Error("CSV headers must be non-empty and unique");
   const indexFor = (column: string, required: boolean): number => {
     const index = headers.indexOf(normalizeHeader(column));
     if (index < 0 && required) throw new Error(`CSV column '${column}' was not found`);
     return index;
   };
   const dateIndex = indexFor(mapping.date, true);
-  const amountIndex = indexFor(mapping.amount, true);
+  if (!mapping.amount && !(mapping.debit && mapping.credit)) throw new Error("Map an amount column or both debit and credit columns");
+  if (mapping.amount && (mapping.debit || mapping.credit)) throw new Error("Choose either amount or debit and credit columns");
+  const amountIndex = mapping.amount ? indexFor(mapping.amount, true) : -1;
+  const debitIndex = mapping.debit ? indexFor(mapping.debit, true) : -1;
+  const creditIndex = mapping.credit ? indexFor(mapping.credit, true) : -1;
   const descriptionIndex = indexFor(mapping.description, true);
-  const externalIdIndex = mapping.externalId ? indexFor(mapping.externalId, false) : -1;
-  const statusIndex = mapping.status ? indexFor(mapping.status, false) : -1;
+  const externalIdIndex = mapping.externalId ? indexFor(mapping.externalId, true) : -1;
+  const statusIndex = mapping.status ? indexFor(mapping.status, true) : -1;
+  if (new Set([dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex].filter((index) => index >= 0)).size !== [dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex].filter((index) => index >= 0).length) throw new Error("Each mapped column must be distinct");
+  if (mapping.dateFormat && !["iso", "day_first", "month_first"].includes(mapping.dateFormat)) throw new Error("date format is invalid");
+  if (mapping.decimalSeparator && mapping.decimalSeparator !== "," && mapping.decimalSeparator !== ".") throw new Error("decimal separator is invalid");
   const transactions: CanonicalTransactionInput[] = [];
   const errors: string[] = [];
   const rowErrors: IngestionRowError[] = [];
@@ -109,8 +121,8 @@ export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): Cs
     const rowNumber = offset + 2;
     if (row.every((value) => !value.trim())) return;
     try {
-      const occurredOn = parseCsvDate(valueAt(row, dateIndex));
-      const amountCents = parseCsvAmount(valueAt(row, amountIndex));
+      const occurredOn = parseCsvDate(valueAt(row, dateIndex), mapping.dateFormat);
+      const amountCents = amountIndex >= 0 ? parseCsvAmount(valueAt(row, amountIndex), mapping.decimalSeparator) : parseDebitCredit(valueAt(row, debitIndex), valueAt(row, creditIndex), mapping.decimalSeparator);
       const description = valueAt(row, descriptionIndex).trim();
       if (!description || description.length > maxDescriptionLength) throw new Error("description is missing or too long");
       const externalId = externalIdIndex < 0 ? null : valueAt(row, externalIdIndex).trim() || null;
@@ -128,6 +140,13 @@ export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): Cs
     }
   });
   return { transactions, errors, rowErrors };
+}
+
+export function csvHeaders(csv: string): string[] {
+  if (new TextEncoder().encode(csv).byteLength > maxCsvBytes) throw new Error("CSV file is too large");
+  const rows = parseCsv(csv);
+  if (rows.length < 2) throw new Error("CSV must contain a header and at least one data row");
+  return rows[0].map((header) => header.trim().replace(/^\uFEFF/, ""));
 }
 
 export async function prepareCanonicalTransactions(input: {
@@ -398,14 +417,20 @@ function parseCsv(input: string): string[][] {
 
 function valueAt(row: string[], index: number): string { return index < row.length ? row[index] : ""; }
 function normalizeHeader(value: string): string { return value.trim().replace(/^\uFEFF/, "").toLowerCase(); }
-function parseCsvDate(value: string): string {
+function parseCsvDate(value: string, format?: CsvColumnMapping["dateFormat"]): string {
   const iso = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const italian = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  const date = iso ? value.trim() : italian ? `${italian[3]}-${italian[2]}-${italian[1]}` : "";
+  const slash = value.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  const date = iso && (!format || format === "iso") ? value.trim() : slash && (!format || format !== "iso")
+    ? `${slash[3]}-${format === "month_first" ? slash[1] : slash[2]}-${format === "month_first" ? slash[2] : slash[1]}` : "";
   try { assertDateOnly(date); return date; } catch { throw new Error("date is invalid"); }
 }
-function parseCsvAmount(value: string): number {
-  const normalized = value.trim().replace(/[€\s]/g, "").replace(/\./g, "").replace(",", ".");
+function parseCsvAmount(value: string, separator?: "," | "."): number {
+  const source = value.trim().replace(/[€\s]/g, "");
+  const decimal = separator ?? (source.includes(",") ? "," : ".");
+  const grouping = decimal === "," ? "." : ",";
+  const escaped = grouping === "." ? "\\." : ",";
+  if (!new RegExp(`^[+-]?(?:\\d+|\\d{1,3}(?:${escaped}\\d{3})+)(?:${decimal === "." ? "\\." : ","}\\d{1,2})?$`).test(source)) throw new Error("amount is invalid");
+  const normalized = source.replaceAll(grouping, "").replace(decimal, ".");
   if (!/^[+-]?\d+(?:\.\d{1,2})?$/.test(normalized)) throw new Error("amount is invalid");
   const negative = normalized.startsWith("-");
   const absolute = normalized.replace(/^[+-]/, "");
@@ -413,6 +438,14 @@ function parseCsvAmount(value: string): number {
   const cents = (Number(whole) * 100 + Number(fraction.padEnd(2, "0"))) * (negative ? -1 : 1);
   if (!Number.isSafeInteger(cents) || cents === 0) throw new Error("amount is invalid");
   return cents;
+}
+function parseDebitCredit(debit: string, credit: string, separator?: "," | "."): number {
+  const hasDebit = debit.trim().length > 0;
+  const hasCredit = credit.trim().length > 0;
+  if (hasDebit === hasCredit) throw new Error("amount is invalid");
+  const cents = parseCsvAmount(hasDebit ? debit : credit, separator);
+  if (cents <= 0) throw new Error("amount is invalid");
+  return hasDebit ? -cents : cents;
 }
 function parseStatus(value: string): TransactionStatus {
   const status = knownStatus.get(value.trim().toLowerCase());

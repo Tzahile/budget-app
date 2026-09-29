@@ -1,6 +1,7 @@
 import { objectBody } from "./validation.ts";
 
 export const MAX_JSON_BODY_BYTES = 32_000;
+export const MAX_CSV_JSON_BODY_BYTES = 1_100_000;
 
 export class RequestSecurityError extends Error {
   constructor(message: string, readonly status: 400 | 413 | 415) {
@@ -24,7 +25,7 @@ export function isJsonContentType(contentType: string | null): boolean {
 }
 
 /** Read JSON with a hard byte limit even when Content-Length is absent or lies. */
-export async function readJsonObject(request: Request): Promise<Record<string, unknown>> {
+export async function readJsonObject(request: Request, maxBytes = MAX_JSON_BODY_BYTES): Promise<Record<string, unknown>> {
   if (!isJsonContentType(request.headers.get("content-type"))) {
     throw new RequestSecurityError("Content-Type must be application/json", 415);
   }
@@ -34,7 +35,7 @@ export async function readJsonObject(request: Request): Promise<Record<string, u
     if (!Number.isSafeInteger(length) || length < 0) {
       throw new RequestSecurityError("Invalid Content-Length", 400);
     }
-    if (length > MAX_JSON_BODY_BYTES) throw new RequestSecurityError("Request body is too large", 413);
+    if (length > maxBytes) throw new RequestSecurityError("Request body is too large", 413);
   }
 
   const reader = request.body?.getReader();
@@ -45,7 +46,7 @@ export async function readJsonObject(request: Request): Promise<Record<string, u
     const { done, value } = await reader.read();
     if (done) break;
     bytes += value.byteLength;
-    if (bytes > MAX_JSON_BODY_BYTES) {
+    if (bytes > maxBytes) {
       await reader.cancel();
       throw new RequestSecurityError("Request body is too large", 413);
     }
