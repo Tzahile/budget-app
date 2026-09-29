@@ -35,6 +35,7 @@ import {
 import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
 import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
+import { exportBackup } from "./server/backup.ts";
 import {
   booleanField,
   centsField,
@@ -85,6 +86,13 @@ app.get("/api/data", async (c) => {
   const asOf = c.req.query("asOf") || householdDate();
   assertDateOnly(asOf);
   return c.json(await getAppData(asOf));
+});
+
+app.get("/api/export", async (c) => {
+  const backup = await exportBackup();
+  c.header("Content-Type", "application/json; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="budgetapp-backup-${backup.exportedAt.slice(0, 10)}.json"`);
+  return c.body(JSON.stringify(backup));
 });
 
 app.post("/api/accounts", async (c) => {

@@ -97,6 +97,7 @@ export function App() {
           <Brand />
           <div className="flex items-center gap-3">
             <span className="hidden text-sm text-stone-500 sm:block">{session.username}</span>
+            <a href="/api/export" download className="text-sm text-green-900 underline hover:text-green-700">Download backup</a>
             <Logout compact />
           </div>
         </div>
