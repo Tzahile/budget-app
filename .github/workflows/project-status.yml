@@ -3,7 +3,7 @@ name: Project status automation
 on:
   create:
   pull_request:
-    types: [opened]
+    types: [opened, reopened, closed]
 
 permissions:
   contents: read
@@ -34,9 +34,15 @@ jobs:
             }
 
             const issueNumber = Number(match[1]);
+            if (context.eventName === 'pull_request' &&
+                context.payload.action === 'closed' &&
+                !context.payload.pull_request.merged) {
+              core.info('Unmerged PR closed; leaving the issue status unchanged.');
+              return;
+            }
             const targetStatus = context.eventName === 'create'
               ? 'In Progress'
-              : 'In Review';
+              : context.payload.action === 'closed' ? 'Done' : 'In Review';
 
             const projectResult = await github.graphql(`
               query {
@@ -99,7 +105,7 @@ jobs:
                         ... on ProjectV2SingleSelectField {
                           id
                           name
-                          options { id name }
+                          options { id name color description }
                         }
                       }
                     }
@@ -116,7 +122,32 @@ jobs:
               return;
             }
 
-            const option = statusField.options.find(o => o.name === targetStatus);
+            let option = statusField.options.find(o => o.name === targetStatus);
+            if (!option && targetStatus === 'In Review') {
+              // The original project predates the review status. Preserve the
+              // IDs of every existing option so current item values survive.
+              const updated = await github.graphql(`
+                mutation($fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
+                  updateProjectV2Field(input: {
+                    fieldId: $fieldId
+                    singleSelectOptions: $options
+                  }) {
+                    projectV2Field {
+                      ... on ProjectV2SingleSelectField {
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              `, {
+                fieldId: statusField.id,
+                options: [
+                  ...statusField.options.map(({ id, name, color, description }) => ({ id, name, color, description })),
+                  { name: 'In Review', color: 'YELLOW', description: 'Pull request open for review' },
+                ],
+              });
+              option = updated.updateProjectV2Field.projectV2Field.options.find(o => o.name === targetStatus);
+            }
             if (!option) {
               core.setFailed(`Status option '${targetStatus}' was not found.`);
               return;
