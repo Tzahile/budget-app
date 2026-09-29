@@ -6,8 +6,8 @@ authenticated `GET /api/export`. The response is a JSON attachment with
 It contains sensitive household finances: store it in a protected location.
 No export contents are logged by the server.
 
-The root object has `format: "budgetapp-backup"`, `formatVersion: 2`,
-`schemaVersion: 11`, an ISO UTC `exportedAt` timestamp, and `data`.
+The root object has `format: "budgetapp-backup"`, `formatVersion: 3`,
+`schemaVersion: 12`, an ISO UTC `exportedAt` timestamp, and `data`.
 `data` maps database table names to arrays of rows sorted by `id`. Column names
 are the original snake_case schema names, nullable values remain `null`,
 booleans are SQLite `0` or `1`, and money remains integer EUR cents.
@@ -23,7 +23,7 @@ from `accounts`, `planned_transactions`, `transactions`, `reserves`,
 `server/backup.ts`; new migrations must review the projection and increment
 `formatVersion` if the artifact changes. A schema version mismatch blocks
 export until that review. This is an export artifact; a restore/import endpoint
-is not part of version 2.
+is not part of version 3.
 
 The export excludes the internal `app_metadata` table, import retry keys,
 transaction `raw_metadata`, and all provider credentials, tokens, consent

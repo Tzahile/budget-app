@@ -20,8 +20,8 @@ available to spend.
 - explicit synthetic demo dataset
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
-- canonical transaction ingestion with a validated CSV adapter, atomic row-level history, and retry-safe import runs
-- CSV import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
+- canonical transaction ingestion with validated CSV and XLSX adapters, atomic row-level history, and retry-safe import runs
+- CSV/XLSX import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
 - explicit review of detected owned-account transfers from imported transactions
 - authenticated versioned JSON backup download of canonical and audit data
 - documented provider-neutral Open Banking architecture, consent boundary, and
@@ -51,15 +51,20 @@ deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index
 
 No real financial data, statements or credentials belong in this repository.
 
-## CSV import
+## CSV and XLSX import
 
-In **Activity → Import bank CSV**, choose an account and CSV file. Map date,
+In **Activity → Import bank CSV or XLSX**, choose an account and file. For XLSX,
+select the worksheet containing transactions; the same saved CSV mapping profiles
+also apply to XLSX. Map date,
 description, and either a signed amount or separate positive debit/credit
 columns. Optionally map bank transaction ID and status. Choose the source date
 format and decimal separator, then preview rows. Any invalid row blocks import;
 the preview shows row numbers and safe error summaries. Save a mapping profile
 to reuse, edit, or delete it later. The server still routes valid rows through
 canonical ingestion, including duplicate handling and transfer detection.
+XLSX supports up to 500 KB compressed, 20 worksheets, 2,000 rows per sheet,
+30 columns per sheet, and 8 MB total uncompressed ZIP contents. Encrypted,
+corrupt, and formula-containing workbooks are rejected; export values instead.
 
 ## Deployment
 
