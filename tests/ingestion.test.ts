@@ -9,6 +9,14 @@ import {
 } from "../server/ingestion.ts";
 
 describe("CSV canonical ingestion adapter", () => {
+  it("accepts explicitly classified refunds and rejects kinds whose signs disagree", async () => {
+    const base = { occurredOn: "2026-09-16", amountCents: 1_000, description: "Synthetic merchant refund" };
+    const prepared = await prepareCanonicalTransactions({ source: "open_banking", accountId: "account-a", transactions: [{ ...base, kind: "refund" }] });
+    expect(prepared[0].kind).toBe("refund");
+    await expect(prepareCanonicalTransactions({ source: "open_banking", accountId: "account-a", transactions: [{ ...base, kind: "expense" }] })).rejects.toThrow("kind does not match amount sign");
+    await expect(prepareCanonicalTransactions({ source: "open_banking", accountId: "account-a", transactions: [{ ...base, amountCents: -1_000, kind: "refund" }] })).rejects.toThrow("kind does not match amount sign");
+  });
+
   it("normalizes quoted semicolon CSV values and Italian amounts before persistence", () => {
     const result = parseCsvTransactions(
       'Data;Importo;Descrizione;ID;Stato\n16/09/2026;-12,34;"Groceries; family";bank-123;Eseguito\n',

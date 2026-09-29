@@ -1,5 +1,5 @@
 import { assertDateOnly } from "../shared/finance.ts";
-import type { TransactionKind, TransactionStatus } from "../shared/types.ts";
+import type { TransactionStatus } from "../shared/types.ts";
 import type { MigrationStatement } from "./migrations.ts";
 
 export type IngestionSource = "csv" | "open_banking";
@@ -9,6 +9,8 @@ export interface CanonicalTransactionInput {
   occurredOn: string;
   amountCents: number;
   description: string;
+  /** Provider classification when known. Positive credits default to income. */
+  kind?: "income" | "expense" | "refund";
   externalId?: string | null;
   status?: TransactionStatus;
   /** Limited, non-secret source audit data. Never include account credentials. */
@@ -41,7 +43,7 @@ export interface PreparedIngestionTransaction extends CanonicalTransactionInput 
   importIdentity: string;
   /** External IDs can prove an existing record is the same; fingerprints cannot. */
   identityKind: "external" | "fingerprint";
-  kind: TransactionKind;
+  kind: "income" | "expense" | "refund";
   metadataJson: string | null;
   sourcePosition: number;
 }
@@ -149,7 +151,7 @@ export async function prepareCanonicalTransactions(input: {
       // identifier is a trusted source identity, unlike a descriptive tuple.
     }
     identities.add(importIdentity);
-    const kind: TransactionKind = transaction.amountCents > 0 ? "income" : "expense";
+    const kind = transaction.kind ?? (transaction.amountCents > 0 ? "income" : "expense");
     prepared.push({
       ...transaction, id: createId(), importIdentity, identityKind, kind,
       status: transaction.status ?? "cleared",
@@ -356,6 +358,11 @@ export function assessIngestionDuplicates(
 function validateCanonical(transaction: CanonicalTransactionInput): void {
   try { assertDateOnly(transaction.occurredOn); } catch { throw new Error("date must be YYYY-MM-DD"); }
   if (!Number.isSafeInteger(transaction.amountCents) || transaction.amountCents === 0) throw new Error("amount must be non-zero integer cents");
+  if (transaction.kind !== undefined &&
+    (transaction.kind !== "income" && transaction.kind !== "expense" && transaction.kind !== "refund" ||
+      (transaction.kind === "expense" ? transaction.amountCents >= 0 : transaction.amountCents <= 0))) {
+    throw new Error("kind does not match amount sign");
+  }
   if (!transaction.description.trim() || transaction.description.trim().length > maxDescriptionLength) throw new Error("description is missing or too long");
   if (transaction.externalId && transaction.externalId.length > maxExternalIdLength) throw new Error("external ID is too long");
   if (transaction.status && transaction.status !== "cleared" && transaction.status !== "pending") throw new Error("status is invalid");

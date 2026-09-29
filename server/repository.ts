@@ -141,7 +141,7 @@ export async function createTransaction(input: {
   date: string;
   amountCents: number;
   description: string;
-  kind: "income" | "expense";
+  kind: "income" | "expense" | "refund";
   source?: "manual" | "planned";
   plannedTransactionId?: string | null;
 }): Promise<void> {
@@ -420,7 +420,7 @@ export async function updateTransaction(id: string, input: {
   date: string;
   amountCents: number;
   description: string;
-  kind: "income" | "expense";
+  kind: "income" | "expense" | "refund";
 }): Promise<void> {
   await ensureSchema();
   const existing = await one("SELECT * FROM transactions WHERE id = ?", [id]);

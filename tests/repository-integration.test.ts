@@ -34,6 +34,44 @@ function row(sql: string, ...args: (string | number)[]): Record<string, unknown>
 }
 
 describe("repository integration against the migrated SQLite schema", () => {
+  it("applies manual refunds to balances and only the posting month's net spending through edits and deletion", async () => {
+    await createAccount({ name: "Synthetic refunds", type: "checking", balanceCents: 10_000 });
+    const accountId = (await getAppData("2026-10-31")).accounts.find((item) => item.name === "Synthetic refunds")!.id;
+    await createTransaction({ accountId, date: "2026-09-30", amountCents: 3_000, description: "Synthetic refundable purchase", kind: "expense" });
+    await createTransaction({ accountId, date: "2026-10-01", amountCents: 5_000, description: "Synthetic refund", kind: "refund" });
+    let data = await getAppData("2026-10-31");
+    const refund = data.transactions.find((item) => item.description === "Synthetic refund")!;
+    expect(refund).toMatchObject({ kind: "refund", amountCents: 5_000 });
+    expect(data.accounts.find((item) => item.id === accountId)?.balanceCents).toBe(12_000);
+    expect(data.dashboard.spentThisMonthCents).toBe(0);
+    expect((await getAppData("2026-09-30")).dashboard.spentThisMonthCents).toBe(3_000);
+
+    await updateTransaction(refund.id, { accountId, date: "2026-09-30", amountCents: 1_000, description: "Synthetic corrected refund", kind: "refund" });
+    data = await getAppData("2026-09-30");
+    expect(data.accounts.find((item) => item.id === accountId)?.balanceCents).toBe(8_000);
+    expect(data.dashboard.spentThisMonthCents).toBe(2_000);
+    expect((await getAppData("2026-10-31")).dashboard.spentThisMonthCents).toBe(0);
+
+    await deleteTransaction(refund.id);
+    data = await getAppData("2026-09-30");
+    expect(data.accounts.find((item) => item.id === accountId)?.balanceCents).toBe(7_000);
+    expect(data.dashboard.spentThisMonthCents).toBe(3_000);
+  });
+
+  it("keeps bank-classified refunds out of income and preserves default income for other credits", async () => {
+    await createAccount({ name: "Synthetic bank refunds", type: "checking", balanceCents: 0 });
+    const accountId = (await getAppData("2026-11-30")).accounts.find((item) => item.name === "Synthetic bank refunds")!.id;
+    await ingestTransactions({ accountId, filename: "synthetic-bank", source: "open_banking", transactions: [
+      { occurredOn: "2026-11-01", amountCents: -2_000, description: "Synthetic purchase", externalId: "refund-test-expense" },
+      { occurredOn: "2026-11-02", amountCents: 1_200, description: "Synthetic merchant credit", externalId: "refund-test-credit", kind: "refund" },
+      { occurredOn: "2026-11-03", amountCents: 500, description: "Synthetic other credit", externalId: "refund-test-income" },
+    ] });
+    const data = await getAppData("2026-11-30");
+    expect(data.dashboard.spentThisMonthCents).toBe(800);
+    expect(data.transactions.find((item) => item.description === "Synthetic merchant credit")?.kind).toBe("refund");
+    expect(data.transactions.find((item) => item.description === "Synthetic other credit")?.kind).toBe("income");
+  });
+
   it("keeps balances, audit history, planned corrections, transfers, goals, and canonical imports consistent", async () => {
     await createAccount({ name: "Synthetic current", type: "checking", balanceCents: 100_000 });
     await createAccount({ name: "Synthetic savings", type: "savings", balanceCents: 50_000 });
