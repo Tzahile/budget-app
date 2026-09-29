@@ -7,16 +7,20 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "check": "npm run test && npm run typecheck"
+    "check": "npm run test && npm run typecheck",
+    "lint": "eslint ."
   },
   "dependencies": {
     "hono": "4.13.7"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^24.13.4",
     "@types/react": "^18.3.24",
     "@types/react-dom": "^18.3.7",
+    "eslint": "10.11.0",
     "typescript": "^5.9.2",
+    "typescript-eslint": "8.70.0",
     "vitest": "^5.0.0"
   }
 }
