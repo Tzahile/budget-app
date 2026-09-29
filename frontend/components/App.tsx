@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@18.2.0";
 import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/react@18.2.0";
 import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedCompletion, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
+import type { ActivitySource, TransactionPage } from "../../server/transaction-search.ts";
 import { householdDate } from "../../shared/finance.ts";
 import { CsvImport } from "./CsvImport.tsx";
 
@@ -37,6 +38,7 @@ export function App() {
   const [editor, setEditor] = useState<Editor>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [activityRevision, setActivityRevision] = useState(0);
 
   const load = useCallback(async () => {
     const nextSession = await api<Session>("/api/session", undefined, false);
@@ -55,6 +57,7 @@ export function App() {
       await api(path, { method, body: body == null ? undefined : JSON.stringify(body) });
       setEditor(null);
       setData(await api<AppData>("/api/data"));
+      setActivityRevision((revision) => revision + 1);
     } catch (err) {
       setError(messageOf(err));
       throw err;
@@ -130,7 +133,7 @@ export function App() {
             onNavigate={setView}
           />
         ) : view === "activity" ? (
-          <Activity data={data} onImported={async () => setData(await api<AppData>("/api/data"))} onAdd={() => setEditor({ type: "transaction" })} onAddTransfer={() => setEditor({ type: "transfer" })} onTransferDecision={(id, decision) => mutate(`/api/ingested-transfer-candidates/${id}/decision`, "POST", { decision })} onEdit={(item) => setEditor(item.kind === "transfer" ? { type: "transfer", item } : { type: "transaction", item })} onDelete={(item) => item.kind === "transfer"
+          <Activity data={data} revision={activityRevision} onImported={async () => { setData(await api<AppData>("/api/data")); setActivityRevision((revision) => revision + 1); }} onAdd={() => setEditor({ type: "transaction" })} onAddTransfer={() => setEditor({ type: "transfer" })} onTransferDecision={(id, decision) => mutate(`/api/ingested-transfer-candidates/${id}/decision`, "POST", { decision })} onEdit={(item) => setEditor(item.kind === "transfer" ? { type: "transfer", item } : { type: "transaction", item })} onDelete={(item) => item.kind === "transfer"
             ? confirmed("Delete this linked transfer and reverse both account effects?") && mutate(`/api/transfers/${item.transferGroupId}`, "DELETE")
             : confirmed("Delete this transaction and reverse its balance effect?") && mutate(`/api/transactions/${item.id}`, "DELETE")} />
         ) : view === "planned" ? (
@@ -283,16 +286,54 @@ function SourceLine({ label, amount }: { label: string; amount: number }) {
   return <div className="flex items-center justify-between gap-4 text-xs text-stone-500"><span className="min-w-0 truncate">{label}</span><span className="shrink-0">{money(amount)}</span></div>;
 }
 
-function Activity({ data, onImported, onAdd, onAddTransfer, onTransferDecision, onEdit, onDelete }: { data: AppData; onImported: () => Promise<void>; onAdd: () => void; onAddTransfer: () => void; onTransferDecision: (id: string, decision: "confirm" | "reject" | "defer") => void; onEdit: (item: Transaction) => void; onDelete: (item: Transaction) => void }) {
+type ActivityFilters = { accountId: string; from: string; to: string; kind: string; source: string; search: string };
+const emptyActivityFilters: ActivityFilters = { accountId: "", from: "", to: "", kind: "", source: "", search: "" };
+
+function Activity({ data, revision, onImported, onAdd, onAddTransfer, onTransferDecision, onEdit, onDelete }: { data: AppData; revision: number; onImported: () => Promise<void>; onAdd: () => void; onAddTransfer: () => void; onTransferDecision: (id: string, decision: "confirm" | "reject" | "defer") => void; onEdit: (item: Transaction) => void; onDelete: (item: Transaction) => void }) {
   const accounts = useMemo(() => Object.fromEntries(data.accounts.map((a) => [a.id, a.name])), [data.accounts]);
-  const activity = useMemo(() => data.transactions.filter((item) => item.kind !== "transfer" || item.amountCents < 0), [data.transactions]);
-  const transferTargets = useMemo(() => Object.fromEntries(data.transactions.filter((item) => item.kind === "transfer" && item.amountCents > 0).map((item) => [item.transferGroupId!, item])), [data.transactions]);
   const transactions = useMemo(() => Object.fromEntries(data.transactions.map((item) => [item.id, item])), [data.transactions]);
   const candidates = data.ingestedTransferCandidates.filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
+  const [form, setForm] = useState<ActivityFilters>(emptyActivityFilters);
+  const [filters, setFilters] = useState<ActivityFilters>(emptyActivityFilters);
+  const [history, setHistory] = useState<string[]>([]);
+  const [page, setPage] = useState<TransactionPage | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [listError, setListError] = useState("");
+  const cursor = history[history.length - 1];
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ limit: "50" });
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+    if (cursor) params.set("cursor", cursor);
+    setLoading(true);
+    setListError("");
+    api<TransactionPage>(`/api/transactions?${params}`, { signal: controller.signal })
+      .then((result) => { if (!controller.signal.aborted) setPage(result); })
+      .catch((error) => { if (!controller.signal.aborted) setListError(messageOf(error)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [filters, cursor, revision]);
+  const set = (field: keyof ActivityFilters) => (event: FormEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setForm((current) => ({ ...current, [field]: event.currentTarget.value }));
+  const apply = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setPage(null); setHistory([]); setFilters({ ...form }); };
+  const reset = () => { setForm(emptyActivityFilters); setFilters(emptyActivityFilters); setPage(null); setHistory([]); };
   return <Page title="Activity" subtitle="Income, expenses, and refunds change balances; transfers move money between your own accounts." action="Add transaction" onAction={onAdd}>
     <CsvImport accounts={data.accounts.filter((account) => account.isActive)} onImported={onImported} />
     {candidates.length > 0 && <section className="mb-6"><SectionTitle title="Possible transfers" subtitle="Review matching imported debit and credit records. They count normally until confirmed." /><div className="mt-3 grid gap-3">{candidates.map((candidate) => { const outgoing = transactions[candidate.outgoingTransactionId]; const incoming = transactions[candidate.incomingTransactionId]; if (!outgoing || !incoming) return null; return <div key={candidate.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-medium">{money(Math.abs(outgoing.amountCents))} between owned accounts</p><p className="mt-1 text-sm text-stone-600">{accounts[outgoing.accountId] ?? "Unknown account"} ({prettyDate(outgoing.date)}) → {accounts[incoming.accountId] ?? "Unknown account"} ({prettyDate(incoming.date)})</p><p className="mt-1 text-xs text-stone-500">{outgoing.description} / {incoming.description}{candidate.status === "deferred" ? " · deferred" : ""}</p></div><div className="flex flex-wrap gap-2"><SmallButton onClick={() => onTransferDecision(candidate.id, "reject")}>Not a transfer</SmallButton><SmallButton onClick={() => onTransferDecision(candidate.id, "defer")}>Later</SmallButton><SmallButton primary onClick={() => onTransferDecision(candidate.id, "confirm")}>Confirm transfer</SmallButton></div></div></div>; })}</div></section>}
-    <div className="mb-3 flex justify-end"><SmallButton onClick={onAddTransfer}>Transfer between accounts</SmallButton></div><div className="divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{activity.length === 0 ? <EmptyLine>No transactions yet.</EmptyLine> : activity.map((item) => { const target = item.transferGroupId ? transferTargets[item.transferGroupId] : undefined; const transferMeta = target ? `${accounts[item.accountId] ?? "Unknown account"} → ${accounts[target.accountId] ?? "Unknown account"} · transfer` : `${accounts[item.accountId] ?? "Unknown account"} · ${item.kind} · ${item.source}`; return <ListRow key={item.id} title={item.description} meta={`${prettyDate(item.date)} · ${transferMeta}`} amount={item.amountCents} inactive={item.status === "pending"} onEdit={item.source === "manual" ? () => onEdit(item) : undefined} onDelete={item.source === "manual" ? () => onDelete(item) : undefined} />; })}</div>
+    <div className="mb-3 flex justify-end"><SmallButton onClick={onAddTransfer}>Transfer between accounts</SmallButton></div>
+    <form onSubmit={apply} className="mb-4 grid grid-cols-1 gap-3 rounded-2xl border border-stone-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-4">
+      <Field label="Description"><input type="search" maxLength={160} value={form.search} onInput={set("search")} className={inputClass} placeholder="Search activity" /></Field>
+      <Field label="Account"><select value={form.accountId} onChange={set("accountId")} className={inputClass}><option value="">All accounts</option>{data.accounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}</select></Field>
+      <Field label="From date"><input type="date" value={form.from} onInput={set("from")} className={inputClass} /></Field>
+      <Field label="To date"><input type="date" min={form.from || undefined} value={form.to} onInput={set("to")} className={inputClass} /></Field>
+      <Field label="Kind"><select value={form.kind} onChange={set("kind")} className={inputClass}><option value="">All kinds</option><option value="income">Income</option><option value="expense">Expense</option><option value="refund">Refund</option><option value="transfer">Transfer</option></select></Field>
+      <Field label="Source"><select value={form.source} onChange={set("source")} className={inputClass}><option value="">All sources</option><option value="manual">Manual</option><option value="planned">Planned</option><option value="csv">CSV import</option><option value="open_banking">Bank sync</option></select></Field>
+      <div className="flex items-end gap-2 sm:col-span-2"><Button type="submit">Apply filters</Button><Button type="button" secondary onClick={reset}>Clear</Button></div>
+    </form>
+    {listError && <p role="alert" className="mb-3 text-sm text-red-800">{listError}</p>}
+    {loading && <p role="status" className="mb-3 text-sm text-stone-500">Loading activity…</p>}
+    <div className="divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{!loading && page?.items.length === 0 ? <EmptyLine>No matching transactions.</EmptyLine> : page?.items.map((item) => { const transferMeta = item.kind === "transfer" ? `${accounts[item.accountId] ?? "Unknown account"} ${item.amountCents < 0 ? "→" : "←"} ${accounts[item.counterpartAccountId ?? ""] ?? "Unknown account"} · transfer` : `${accounts[item.accountId] ?? "Unknown account"} · ${item.kind}`; const sourceLabel: Record<ActivitySource, string> = { manual: "manual", planned: "planned", csv: "CSV import", open_banking: "bank sync" }; return <ListRow key={item.id} title={item.description} meta={`${prettyDate(item.date)} · ${transferMeta} · ${sourceLabel[item.activitySource]}`} amount={item.amountCents} inactive={item.status === "pending"} onEdit={item.source === "manual" && (item.kind !== "transfer" || item.amountCents < 0) ? () => onEdit(item) : undefined} onDelete={item.source === "manual" && (item.kind !== "transfer" || item.amountCents < 0) ? () => onDelete(item) : undefined} />; })}</div>
+    <div className="mt-4 flex items-center justify-between gap-3 text-sm"><span className="text-stone-500">Page {history.length + 1}</span><div className="flex gap-2"><SmallButton onClick={() => { setPage(null); setHistory((current) => current.slice(0, -1)); }} disabled={loading || history.length === 0}>Previous</SmallButton><SmallButton onClick={() => { if (page?.nextCursor) { setPage(null); setHistory((current) => [...current, page.nextCursor!]); } }} disabled={loading || !page?.nextCursor}>Next</SmallButton></div></div>
   </Page>;
 }
 
@@ -315,7 +356,7 @@ function Accounts({ data, onAdd, onEdit, onReconcile, onDelete }: { data: AppDat
 function EditorModal({ editor, data, busy, onClose, onSave }: { editor: NonNullable<Editor>; data: AppData; busy: boolean; onClose: () => void; onSave: (payload: unknown) => Promise<void> }) {
   const item = editor.item;
   const baseDate = today();
-  const initial = editor.type === "correction" ? { amount: euros(Math.abs(editor.item.effectiveTransaction?.amountCents ?? 0)), date: editor.item.effectiveTransaction?.date ?? baseDate, accountId: editor.item.effectiveTransaction?.accountId ?? data.accounts[0]?.id ?? "" } : editor.type === "reconciliation" ? { actualBalance: euros(editor.item.balanceCents), date: baseDate, note: "" } : editor.type === "transfer" && editor.item ? { description: editor.item.description, amount: euros(Math.abs(editor.item.amountCents)), date: editor.item.date, fromAccountId: editor.item.amountCents < 0 ? editor.item.accountId : "", toAccountId: transferDestination(data.transactions, editor.item.transferGroupId) } : editor.item ? itemToForm(editor.type, editor.item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "transfer" ? { description: "Transfer", amount: "", date: baseDate, fromAccountId: data.accounts[0]?.id ?? "", toAccountId: data.accounts[1]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", funded: "", note: "", hasGoal: false, target: "", targetDate: "", linkedPlannedTransactionId: "", isActive: true };
+  const initial = editor.type === "correction" ? { amount: euros(Math.abs(editor.item.effectiveTransaction?.amountCents ?? 0)), date: editor.item.effectiveTransaction?.date ?? baseDate, accountId: editor.item.effectiveTransaction?.accountId ?? data.accounts[0]?.id ?? "" } : editor.type === "reconciliation" ? { actualBalance: euros(editor.item.balanceCents), date: baseDate, note: "" } : editor.type === "transfer" && editor.item ? { description: editor.item.description, amount: euros(Math.abs(editor.item.amountCents)), date: editor.item.date, fromAccountId: editor.item.amountCents < 0 ? editor.item.accountId : "", toAccountId: (editor.item as Transaction & { counterpartAccountId?: string }).counterpartAccountId ?? transferDestination(data.transactions, editor.item.transferGroupId) } : editor.item ? itemToForm(editor.type, editor.item) : editor.type === "account" ? { name: "", type: "checking", balance: "0.00", isActive: true } : editor.type === "transaction" ? { description: "", kind: "expense", amount: "", date: baseDate, accountId: data.accounts[0]?.id ?? "" } : editor.type === "transfer" ? { description: "Transfer", amount: "", date: baseDate, fromAccountId: data.accounts[0]?.id ?? "", toAccountId: data.accounts[1]?.id ?? "" } : editor.type === "planned" ? { description: "", kind: "expense", amount: "", nextDate: baseDate, recurrence: "monthly", intervalCount: "1", endDate: "", accountId: data.accounts[0]?.id ?? "", isActive: true } : { name: "", funded: "", note: "", hasGoal: false, target: "", targetDate: "", linkedPlannedTransactionId: "", isActive: true };
   const [form, setForm] = useState<Record<string, string | boolean>>(initial);
   const [formError, setFormError] = useState("");
   const reserveId = editor.type === "reserve" ? editor.item?.id : undefined;
