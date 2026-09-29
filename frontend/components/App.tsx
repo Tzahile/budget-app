@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "https://esm.sh/react@
 import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/react@18.2.0";
 import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedCompletion, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
 import { householdDate } from "../../shared/finance.ts";
+import { CsvImport } from "./CsvImport.tsx";
 
 type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
 type Editor =
@@ -129,7 +130,7 @@ export function App() {
             onNavigate={setView}
           />
         ) : view === "activity" ? (
-          <Activity data={data} onAdd={() => setEditor({ type: "transaction" })} onAddTransfer={() => setEditor({ type: "transfer" })} onTransferDecision={(id, decision) => mutate(`/api/ingested-transfer-candidates/${id}/decision`, "POST", { decision })} onEdit={(item) => setEditor(item.kind === "transfer" ? { type: "transfer", item } : { type: "transaction", item })} onDelete={(item) => item.kind === "transfer"
+          <Activity data={data} onImported={async () => setData(await api<AppData>("/api/data"))} onAdd={() => setEditor({ type: "transaction" })} onAddTransfer={() => setEditor({ type: "transfer" })} onTransferDecision={(id, decision) => mutate(`/api/ingested-transfer-candidates/${id}/decision`, "POST", { decision })} onEdit={(item) => setEditor(item.kind === "transfer" ? { type: "transfer", item } : { type: "transaction", item })} onDelete={(item) => item.kind === "transfer"
             ? confirmed("Delete this linked transfer and reverse both account effects?") && mutate(`/api/transfers/${item.transferGroupId}`, "DELETE")
             : confirmed("Delete this transaction and reverse its balance effect?") && mutate(`/api/transactions/${item.id}`, "DELETE")} />
         ) : view === "planned" ? (
@@ -282,13 +283,14 @@ function SourceLine({ label, amount }: { label: string; amount: number }) {
   return <div className="flex items-center justify-between gap-4 text-xs text-stone-500"><span className="min-w-0 truncate">{label}</span><span className="shrink-0">{money(amount)}</span></div>;
 }
 
-function Activity({ data, onAdd, onAddTransfer, onTransferDecision, onEdit, onDelete }: { data: AppData; onAdd: () => void; onAddTransfer: () => void; onTransferDecision: (id: string, decision: "confirm" | "reject" | "defer") => void; onEdit: (item: Transaction) => void; onDelete: (item: Transaction) => void }) {
+function Activity({ data, onImported, onAdd, onAddTransfer, onTransferDecision, onEdit, onDelete }: { data: AppData; onImported: () => Promise<void>; onAdd: () => void; onAddTransfer: () => void; onTransferDecision: (id: string, decision: "confirm" | "reject" | "defer") => void; onEdit: (item: Transaction) => void; onDelete: (item: Transaction) => void }) {
   const accounts = useMemo(() => Object.fromEntries(data.accounts.map((a) => [a.id, a.name])), [data.accounts]);
   const activity = useMemo(() => data.transactions.filter((item) => item.kind !== "transfer" || item.amountCents < 0), [data.transactions]);
   const transferTargets = useMemo(() => Object.fromEntries(data.transactions.filter((item) => item.kind === "transfer" && item.amountCents > 0).map((item) => [item.transferGroupId!, item])), [data.transactions]);
   const transactions = useMemo(() => Object.fromEntries(data.transactions.map((item) => [item.id, item])), [data.transactions]);
   const candidates = data.ingestedTransferCandidates.filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
   return <Page title="Activity" subtitle="Income, expenses, and refunds change balances; transfers move money between your own accounts." action="Add transaction" onAction={onAdd}>
+    <CsvImport accounts={data.accounts.filter((account) => account.isActive)} onImported={onImported} />
     {candidates.length > 0 && <section className="mb-6"><SectionTitle title="Possible transfers" subtitle="Review matching imported debit and credit records. They count normally until confirmed." /><div className="mt-3 grid gap-3">{candidates.map((candidate) => { const outgoing = transactions[candidate.outgoingTransactionId]; const incoming = transactions[candidate.incomingTransactionId]; if (!outgoing || !incoming) return null; return <div key={candidate.id} className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-medium">{money(Math.abs(outgoing.amountCents))} between owned accounts</p><p className="mt-1 text-sm text-stone-600">{accounts[outgoing.accountId] ?? "Unknown account"} ({prettyDate(outgoing.date)}) → {accounts[incoming.accountId] ?? "Unknown account"} ({prettyDate(incoming.date)})</p><p className="mt-1 text-xs text-stone-500">{outgoing.description} / {incoming.description}{candidate.status === "deferred" ? " · deferred" : ""}</p></div><div className="flex flex-wrap gap-2"><SmallButton onClick={() => onTransferDecision(candidate.id, "reject")}>Not a transfer</SmallButton><SmallButton onClick={() => onTransferDecision(candidate.id, "defer")}>Later</SmallButton><SmallButton primary onClick={() => onTransferDecision(candidate.id, "confirm")}>Confirm transfer</SmallButton></div></div></div>; })}</div></section>}
     <div className="mb-3 flex justify-end"><SmallButton onClick={onAddTransfer}>Transfer between accounts</SmallButton></div><div className="divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{activity.length === 0 ? <EmptyLine>No transactions yet.</EmptyLine> : activity.map((item) => { const target = item.transferGroupId ? transferTargets[item.transferGroupId] : undefined; const transferMeta = target ? `${accounts[item.accountId] ?? "Unknown account"} → ${accounts[target.accountId] ?? "Unknown account"} · transfer` : `${accounts[item.accountId] ?? "Unknown account"} · ${item.kind} · ${item.source}`; return <ListRow key={item.id} title={item.description} meta={`${prettyDate(item.date)} · ${transferMeta}`} amount={item.amountCents} inactive={item.status === "pending"} onEdit={item.source === "manual" ? () => onEdit(item) : undefined} onDelete={item.source === "manual" ? () => onDelete(item) : undefined} />; })}</div>
   </Page>;

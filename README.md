@@ -21,6 +21,7 @@ available to spend.
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
 - canonical transaction ingestion with a validated CSV adapter, atomic row-level history, and retry-safe import runs
+- CSV import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
 - explicit review of detected owned-account transfers from imported transactions
 - authenticated versioned JSON backup download of canonical and audit data
 - documented provider-neutral Open Banking architecture, consent boundary, and
@@ -49,6 +50,16 @@ deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index
 ```
 
 No real financial data, statements or credentials belong in this repository.
+
+## CSV import
+
+In **Activity → Import bank CSV**, choose an account and CSV file. Map date,
+description, and either a signed amount or separate positive debit/credit
+columns. Optionally map bank transaction ID and status. Choose the source date
+format and decimal separator, then preview rows. Any invalid row blocks import;
+the preview shows row numbers and safe error summaries. Save a mapping profile
+to reuse, edit, or delete it later. The server still routes valid rows through
+canonical ingestion, including duplicate handling and transfer detection.
 
 ## Deployment
 

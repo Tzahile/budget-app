@@ -39,6 +39,8 @@ beforeAll(async () => {
       VALUES ('tc', 't1', 't2', '2026-09-01');
     INSERT INTO app_metadata (key, value, updated_at)
       VALUES ('provider_token', 'synthetic-app-secret-never-export', '2026-09-01');
+    INSERT INTO csv_mapping_profiles (id, name, mapping_json, created_at, updated_at)
+      VALUES ('csv-profile', 'Synthetic mapping', '{"date":"Date","amount":"Amount","description":"Description"}', '2026-09-01', '2026-09-01');
   `);
   const insert = database.prepare(`INSERT INTO transactions
     (id, account_id, date, amount_cents, description, kind, status, source, created_at, updated_at)
@@ -69,14 +71,14 @@ describe("authenticated portable backup", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const serialized = await response.text();
     const backup = JSON.parse(serialized) as BudgetBackup;
-    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 1, schemaVersion: 10 });
+    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 2, schemaVersion: 11 });
     expect(Number.isNaN(Date.parse(backup.exportedAt))).toBe(false);
     expect(Object.keys(backup.data).sort()).toEqual(Object.keys(BACKUP_TABLES).sort());
     expect(backup.data.transactions).toHaveLength(503);
     for (const [table, id] of Object.entries({
       accounts: "a", planned_transactions: "p", transactions: "t1", reserves: "r",
       planned_completions: "pc", account_reconciliations: "ar", imports: "i",
-      ingestion_items: "ii", ingested_transfer_candidates: "tc",
+      ingestion_items: "ii", ingested_transfer_candidates: "tc", csv_mapping_profiles: "csv-profile",
     })) expect(backup.data[table as keyof typeof backup.data]).toContainEqual(expect.objectContaining({ id }));
     expect(backup.data.accounts[0]).toMatchObject({ balance_cents: 1200 });
     expect(backup.data.imports[0]).toMatchObject({ row_count: 2, account_id: "a" });
@@ -89,7 +91,7 @@ describe("authenticated portable backup", () => {
   });
 
   it("fails closed when new schema data has not been reviewed for portability", async () => {
-    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (11, '2026-09-01')").run();
+    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (12, '2026-09-01')").run();
     const response = await request("/api/export");
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "Unexpected server error" });
