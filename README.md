@@ -22,6 +22,7 @@ available to spend.
 - pure financial calculation tests
 - canonical transaction ingestion with a validated CSV adapter, atomic row-level history, and retry-safe import runs
 - explicit review of detected owned-account transfers from imported transactions
+- authenticated versioned JSON backup download of canonical and audit data
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
 
@@ -29,6 +30,7 @@ All persisted money uses integer EUR cents. See
 [`docs/financial-semantics.md`](docs/financial-semantics.md) for the exact
 calculation rules, [`docs/database-migrations.md`](docs/database-migrations.md)
 for schema-change conventions,
+[`docs/backup-format.md`](docs/backup-format.md) for backup format and exclusions,
 [`docs/open-banking-architecture.md`](docs/open-banking-architecture.md) for
 the Open Banking integration boundary, and [`ROADMAP.md`](ROADMAP.md) for
 remaining Open Banking and React Native work.
