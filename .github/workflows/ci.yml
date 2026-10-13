@@ -26,4 +26,4 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
-      - run: deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx
+      - run: deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx server/gemini-advisor.ts

@@ -58,7 +58,7 @@ npm ci
 npm run test
 npm run typecheck
 npm run lint
-deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx
+deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx server/gemini-advisor.ts
 ```
 
 **Repository owner setup (once):** In GitHub, open **Settings → Rules →
