@@ -381,6 +381,8 @@ function replayIngestion(row: Row): {
 function normalizeRetryKey(value: string | null | undefined): string | null {
   if (value == null) return null;
   const normalized = value.trim();
+  // Reject ASCII control characters in retry keys.
+  // eslint-disable-next-line no-control-regex
   if (!normalized || normalized.length > 200 || /[\u0000-\u001f\u007f]/.test(normalized)) {
     throw Object.assign(new Error("Retry key is invalid"), { status: 400 });
   }
