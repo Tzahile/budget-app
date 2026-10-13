@@ -35,6 +35,22 @@ describe("XLSX adapter", () => {
     expect(() => parseXlsxSheet(workbook, "missing", mapping)).toThrow("not found");
   });
 
+  it("preserves native numeric cents with Italian comma-based profiles", async () => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Transactions");
+    sheet.addRow(["Date", "Amount", "Description"]);
+    sheet.addRow(["2026-09-01", -12.34, "Synthetic expense"]);
+    sheet.addRow(["2026-09-02", 1.234, "Synthetic invalid precision"]);
+    sheet.addRow(["2026-09-03", 1234.56, "Synthetic income"]);
+    const loaded = await readXlsxWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64"));
+    const result = parseXlsxSheet(loaded, "Transactions", {
+      date: "Date", amount: "Amount", description: "Description", decimalSeparator: ",",
+    });
+    expect(result.transactions.map((entry) => entry.amountCents)).toEqual([-1234, 123456]);
+    expect(result.rowErrors).toHaveLength(1);
+    expect(result.rowErrors[0]?.sourcePosition).toBe(3);
+  });
+
   it("rejects corrupt, encrypted and oversized archives and formula cells", async () => {
     await expect(readXlsxWorkbook("not-base64")).rejects.toThrow("invalid");
     const bytes = Buffer.from(await fixture(), "base64");
