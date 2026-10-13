@@ -40,6 +40,7 @@ import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECU
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import { exportBackup } from "./server/backup.ts";
 import { parseTransactionFilters } from "./server/transaction-search.ts";
+import { createAiRoutes } from "./server/ai-routes.ts";
 import {
   booleanField,
   centsField,
@@ -91,6 +92,10 @@ app.get("/api/data", async (c) => {
   assertDateOnly(asOf);
   return c.json(await getAppData(asOf));
 });
+
+// Live AI remains disabled pending the Italy/free-only provider decision.
+// Do not inject GeminiAdvisor or expose a configuration switch around this gate.
+app.route("/api/ai", createAiRoutes({ getDashboard: async () => (await getAppData(householdDate())).dashboard }));
 
 app.get("/api/transactions", async (c) => c.json(await listTransactions(parseTransactionFilters(new URL(c.req.url).searchParams))));
 
