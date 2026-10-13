@@ -2,7 +2,7 @@ import { assertDateOnly } from "../shared/finance.ts";
 import type { TransactionStatus } from "../shared/types.ts";
 import type { MigrationStatement } from "./migrations.ts";
 
-export type IngestionSource = "csv" | "open_banking";
+export type IngestionSource = "csv" | "xlsx" | "open_banking";
 
 /** The source-neutral boundary every import and future bank sync must cross. */
 export interface CanonicalTransactionInput {
@@ -92,10 +92,15 @@ const knownStatus: ReadonlyMap<string, TransactionStatus> = new Map([
 export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): CsvParseResult {
   if (new TextEncoder().encode(csv).byteLength > maxCsvBytes) throw new Error("CSV file is too large");
   const rows = parseCsv(csv);
-  if (rows.length < 2) throw new Error("CSV must contain a header and at least one data row");
-  if (rows.length - 1 > maxRows) throw new Error(`CSV contains more than ${maxRows} rows`);
+  return parseTabularTransactions(rows, mapping, "csv");
+}
+
+/** Shared mapping and validation for delimited files and spreadsheet rows. */
+export function parseTabularTransactions(rows: string[][], mapping: CsvColumnMapping, adapter: "csv" | "xlsx"): CsvParseResult {
+  if (rows.length < 2) throw new Error(`${adapter.toUpperCase()} must contain a header and at least one data row`);
+  if (rows.length - 1 > maxRows) throw new Error(`${adapter.toUpperCase()} contains more than ${maxRows} rows`);
   const headers = rows[0].map(normalizeHeader);
-  if (headers.some((header) => !header) || new Set(headers).size !== headers.length) throw new Error("CSV headers must be non-empty and unique");
+  if (headers.some((header) => !header) || new Set(headers).size !== headers.length) throw new Error(`${adapter.toUpperCase()} headers must be non-empty and unique`);
   const indexFor = (column: string, required: boolean): number => {
     const index = headers.indexOf(normalizeHeader(column));
     if (index < 0 && required) throw new Error(`CSV column '${column}' was not found`);
@@ -130,7 +135,7 @@ export function parseCsvTransactions(csv: string, mapping: CsvColumnMapping): Cs
       const status = statusIndex < 0 ? "cleared" : parseStatus(valueAt(row, statusIndex));
       transactions.push({
         occurredOn, amountCents, description, externalId, status,
-        auditMetadata: { adapter: "csv", row: String(rowNumber) },
+        auditMetadata: { adapter, row: String(rowNumber) },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "invalid value";
@@ -305,7 +310,7 @@ function ingestionItemStatement(input: {
 
 function sourcePosition(transaction: CanonicalTransactionInput, index: number): number {
   const parsed = Number(transaction.auditMetadata?.row);
-  return transaction.auditMetadata?.adapter === "csv" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : index + 1;
+  return (transaction.auditMetadata?.adapter === "csv" || transaction.auditMetadata?.adapter === "xlsx") && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : index + 1;
 }
 
 function csvErrorCode(message: string): IngestionRowError["code"] {
