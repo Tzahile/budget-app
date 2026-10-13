@@ -22,6 +22,24 @@ function request(path: string, init: RequestInit = {}, user: string | null = "tz
 }
 
 describe("Hono financial API security integration", () => {
+  it("protects AI previews and keeps confirmed production AI disabled without accounting mutations", async () => {
+    const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+    for (const path of ["/api/ai/preview", "/api/ai/advice"]) {
+      expect((await request(path, { method: "POST", headers, body: "{}" }, null)).status).toBe(401);
+      expect((await request(path, { method: "POST", headers, body: "{}" }, "not-allowed")).status).toBe(403);
+      expect((await request(path, { method: "POST", body: "{}" })).status).toBe(403);
+    }
+    const before = await (await request("/api/data")).json();
+    const previewResponse = await request("/api/ai/preview", { method: "POST", headers, body: "{}" });
+    expect(previewResponse.status).toBe(200);
+    expect(previewResponse.headers.get("Cache-Control")).toBe("no-store");
+    const preview = await previewResponse.json() as { payload: string; available: boolean };
+    expect(preview.available).toBe(false);
+    const send = await request("/api/ai/advice", { method: "POST", headers, body: JSON.stringify({ payload: preview.payload, confirmed: true }) });
+    expect(send.status).toBe(503);
+    expect(await send.json()).toMatchObject({ code: "disabled" });
+    expect(await (await request("/api/data")).json()).toEqual(before);
+  });
   it("previews XLSX sheets, imports via saved CSV mapping, and deduplicates across formats", async () => {
     const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
     const workbook = new ExcelJS.Workbook();

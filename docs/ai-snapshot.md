@@ -30,11 +30,12 @@ serialized boundary for prohibited data.
 
 `AiAdvisor` is a provider-neutral interface that accepts only the snapshot and
 returns advisory text. `server/gemini-advisor.ts` implements an inert server-only
-Gemini adapter; constructing it does not make a request. There is no endpoint,
-UI integration, automatic request, or logging of payloads. Provider output is advisory
+Gemini adapter; constructing it does not make a request. The optional Ask AI
+flow previews data locally; production external sending remains disabled.
+There is no automatic request or logging of payloads. Provider output is advisory
 text only; it must not be interpreted as accounting commands or written to
-balances, transactions, reserves, or plans. Any future UI should show the exact
-payload before an optional external request and require an explicit action.
+balances, transactions, reserves, or plans. The UI shows the exact payload
+before an optional external request and requires an explicit action.
 
 ## Gemini adapter and deployment gate
 
@@ -64,8 +65,8 @@ At the egress boundary, runtime validation rejects unknown fields at every
 schema level, invalid month strings, unsafe/noninteger cents, accessors,
 custom prototypes, sparse arrays, and custom serialization. It does not
 silently strip or rewrite a contaminated payload. The user-message text is
-exactly `JSON.stringify(snapshot)` after validation, so the future preview and
-confirmation flow must display that same snapshot serialization and invoke
+exactly `JSON.stringify(snapshot)` after validation. The preview and
+confirmation flow displays that same snapshot serialization and invokes
 the adapter only after explicit confirmation. The fixed system instruction
 labels facts, recommendations, assumptions, and uncertainty; the adapter has
 no database access, tools, or accounting mutation capability.
@@ -78,15 +79,52 @@ provider thought parts are discarded and final text must contain strict JSON
 matching `AiAdvice`: a nonempty summary of at most 2,000 characters and at most
 10 nonempty considerations of at most 1,000 characters each. Refusal, truncation,
 invalid JSON/schema, and oversized output fail closed. Text remains untrusted
-advice; a future UI must render it as text, not HTML or executable commands.
+advice; the UI renders it as text, not HTML or executable commands.
 
 `GeminiAdviceError.code` distinguishes `invalid_snapshot`, `configuration`,
 `timeout`, `rate_limit` (HTTP 429), `authentication` (401/403), `provider`, and
 `invalid_response`. Error messages contain no provider body, input payload,
-credential, or raw transport error. A later authenticated consent endpoint
-can map these codes to recoverable UI states. Tests use synthetic snapshots
+credential, or raw transport error. The authenticated consent endpoint
+maps these codes to recoverable UI states. Tests use synthetic snapshots
 and mocked fetch only; no provider request is made by tests or on startup.
 
 Protocol references: [generateContent REST API](https://ai.google.dev/api/generate-content),
 [structured output](https://ai.google.dev/gemini-api/docs/structured-output),
 and [API keys](https://ai.google.dev/gemini-api/docs/api-key).
+
+## Ask AI preview and consent
+
+The Overview's **Ask AI: preview data** button is the only action that requests
+`POST /api/ai/preview` (an empty JSON object). Both AI routes are mounted behind
+the existing session/owner allowlist and same-origin mutation protections;
+responses have `Cache-Control: no-store`. The preview derives one allowlisted
+snapshot from the deterministic dashboard and returns its exact JSON string.
+No provider is called during app load, dashboard refresh, preview, or cancel.
+
+The preview displays that exact string, describes aggregate sensitivity and
+Google Gemini as the external provider, and separates advice from accounting
+facts. It remains fixed until another preview is requested. A checkbox approves
+only the displayed payload; a separate **Confirm and send to Gemini** action
+submits `{ "confirmed": true, "payload": "<the displayed JSON string>" }` to
+`POST /api/ai/advice`. The endpoint requires explicit boolean confirmation,
+rejects extra request fields, validates the nested snapshot fail-closed, and
+requires its serialization to exactly match the supplied string. It does not
+recompute current dashboard figures before sending. This is a stateless
+round-trip, not a signed assertion that the household's balances remain
+unchanged after preview. The allowlisted user can submit validated aggregate
+values; none can alter accounting state.
+
+**Production keeps sending disabled:** the HTTP entrypoint injects no advisor
+into `createAiRoutes`. Preview returns `available: false` with the Italy/free-only
+reason, the UI disables approval/sending, and even a direct valid confirmed
+request returns HTTP 503 with `code: "disabled"`. There is no environment flag,
+provider key, or billing fallback that enables live requests. A compliant
+provider decision and a reviewed implementation change are prerequisites for
+activation. Synthetic tests inject a fake `AiAdvisor` to exercise the consent
+and advisory-result path without external traffic.
+
+If enabled after that decision, the result appears in a separate recommendations
+panel as escaped text. Errors remain bounded; rate limits use HTTP 429 and other
+provider failures HTTP 503. A failed request consumes the checkbox consent;
+retry requires explicit approval again. No automatic retries or accounting
+writes occur. Cancel closes preview/results without sending.
