@@ -36,18 +36,37 @@ for schema-change conventions,
 the Open Banking integration boundary, and [`ROADMAP.md`](ROADMAP.md) for
 remaining Open Banking and React Native work.
 
-## Local checks
+## Local checks and PR validation
+
+During implementation, run focused checks for the files and behaviors you change;
+for example, `npx vitest run tests/<relevant-test>.test.ts` or
+`npx eslint <changed-file>`. Use broader local checks only when investigating a
+failure. Do not routinely repeat the entire test, typecheck, lint, and Deno
+matrix as an agent's final validation step.
+
+On every pull request, [GitHub Actions CI](.github/workflows/ci.yml) runs
+`npm ci`, the full Vitest suite, TypeScript typechecking, ESLint, and the Deno
+module graph check. The required status check is displayed as
+**CI / Validate** (job name `Validate`, GitHub Actions). Wait for that check
+to succeed before merging. On `main`, the deployment workflow separately
+checks the revision and deploys to Val Town.
+
+For occasional full local verification:
 
 ```sh
 npm ci
-npm run check
-```
-
-The deployed module graph can also be checked with Deno:
-
-```sh
+npm run test
+npm run typecheck
+npm run lint
 deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx
 ```
+
+**Repository owner setup (once):** In GitHub, open **Settings → Rules →
+Rulesets → New branch ruleset**. Target `main`; require a pull request before
+merging and require status checks to pass. Add the `Validate` check from
+**GitHub Actions** (`CI / Validate` in the checks UI), then activate the
+ruleset. Do not consider CI merge enforcement complete until a failing or
+pending check prevents merging. A passing check alone is not branch protection.
 
 No real financial data, statements or credentials belong in this repository.
 
