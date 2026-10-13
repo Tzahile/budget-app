@@ -43,8 +43,22 @@ import {
   insertTransferCandidateStatements,
   type TransferDetectionTransaction,
 } from "./ingested-transfers.ts";
+import { nextTransactionCursor, transactionPageQuery, type TransactionFilters, type TransactionPage } from "./transaction-search.ts";
 
 type Row = Record<string, unknown>;
+
+export async function listTransactions(filters: TransactionFilters): Promise<TransactionPage> {
+  await ensureSchema();
+  const result = await db.execute(transactionPageQuery(filters));
+  const rows = result.rows as Row[];
+  return {
+    items: rows.slice(0, filters.limit).map((row) => ({
+      ...mapTransaction(row), activitySource: row.activity_source as TransactionPage["items"][number]["activitySource"],
+      counterpartAccountId: row.counterpart_account_id == null ? null : String(row.counterpart_account_id),
+    })),
+    nextCursor: nextTransactionCursor(rows.map((row) => ({ date: String(row.date), createdAt: String(row.created_at), id: String(row.id) })), filters.limit),
+  };
+}
 
 export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   await ensureSchema();

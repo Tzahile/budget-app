@@ -21,6 +21,7 @@ import {
   getAppData,
   getIngestionHistory,
   ingestTransactions,
+  listTransactions,
   reconcileAccount,
   seedDemoData,
   updateAccount,
@@ -38,6 +39,7 @@ import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile 
 import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import { exportBackup } from "./server/backup.ts";
+import { parseTransactionFilters } from "./server/transaction-search.ts";
 import {
   booleanField,
   centsField,
@@ -89,6 +91,8 @@ app.get("/api/data", async (c) => {
   assertDateOnly(asOf);
   return c.json(await getAppData(asOf));
 });
+
+app.get("/api/transactions", async (c) => c.json(await listTransactions(parseTransactionFilters(new URL(c.req.url).searchParams))));
 
 app.get("/api/export", async (c) => {
   const backup = await exportBackup();
