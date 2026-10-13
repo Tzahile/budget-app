@@ -8,167 +8,29 @@ on:
 permissions:
   contents: read
 
+# One writer for replacement-style field updates; never cancel an active repair.
+concurrency:
+  group: budgetapp-project-status
+  queue: max
+  cancel-in-progress: false
+
 jobs:
   update-project-status:
     if: >-
       (github.event_name == 'create' && github.event.ref_type == 'branch') ||
-      github.event_name == 'pull_request'
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
-      - name: Update linked issue project status
+      - uses: actions/checkout@v5
+        with:
+          # Same-repository PRs only; forks never execute code with PROJECT_TOKEN.
+          ref: ${{ github.event.pull_request.head.sha || github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Repair canonical statuses and update linked issue
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PROJECT_TOKEN }}
           script: |
-            const repo = 'budget-app';
-            const projectTitle = "@Tzahile's budgetApp project";
-
-            const branch = context.eventName === 'create'
-              ? context.payload.ref
-              : context.payload.pull_request.head.ref;
-
-            const match = branch.match(/^issue-(\d+)(?:-|$)/i);
-            if (!match) {
-              core.info(`Branch '${branch}' does not match issue-<number>-..., skipping.`);
-              return;
-            }
-
-            const issueNumber = Number(match[1]);
-            if (context.eventName === 'pull_request' &&
-                context.payload.action === 'closed' &&
-                !context.payload.pull_request.merged) {
-              core.info('Unmerged PR closed; leaving the issue status unchanged.');
-              return;
-            }
-            const targetStatus = context.eventName === 'create'
-              ? 'In Progress'
-              : context.payload.action === 'closed' ? 'Done' : 'In Review';
-
-            const projectResult = await github.graphql(`
-              query {
-                viewer {
-                  login
-                  projectsV2(first: 100) {
-                    nodes { id number title }
-                  }
-                }
-              }
-            `);
-
-            const owner = projectResult.viewer.login;
-            const project = projectResult.viewer?.projectsV2?.nodes?.find(
-              p => p.title === projectTitle
-            );
-            if (!project) {
-              const names = projectResult.viewer?.projectsV2?.nodes?.map(p => p.title).join(', ') || '(none)';
-              core.setFailed(`Project '${projectTitle}' was not found for ${owner}. Visible projects: ${names}`);
-              return;
-            }
-
-            const issueResult = await github.graphql(`
-              query($owner: String!, $repo: String!, $number: Int!) {
-                repository(owner: $owner, name: $repo) {
-                  issue(number: $number) {
-                    id
-                    url
-                    projectItems(first: 100) {
-                      nodes {
-                        id
-                        project { id title }
-                      }
-                    }
-                  }
-                }
-              }
-            `, { owner, repo, number: issueNumber });
-
-            const issue = issueResult.repository?.issue;
-            if (!issue) {
-              core.setFailed(`Issue #${issueNumber} was not found.`);
-              return;
-            }
-
-            const item = issue.projectItems.nodes.find(
-              i => i.project.id === project.id
-            );
-            if (!item) {
-              core.setFailed(`Issue #${issueNumber} is not in project '${projectTitle}'.`);
-              return;
-            }
-
-            const fieldsResult = await github.graphql(`
-              query($projectId: ID!) {
-                node(id: $projectId) {
-                  ... on ProjectV2 {
-                    fields(first: 100) {
-                      nodes {
-                        ... on ProjectV2SingleSelectField {
-                          id
-                          name
-                          options { id name color description }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            `, { projectId: project.id });
-
-            const statusField = fieldsResult.node.fields.nodes.find(
-              f => f?.name === 'Status'
-            );
-            if (!statusField) {
-              core.setFailed("Project field 'Status' was not found.");
-              return;
-            }
-
-            let option = statusField.options.find(o => o.name === targetStatus);
-            if (!option && targetStatus === 'In Review') {
-              // The original project predates the review status. Preserve the
-              // IDs of every existing option so current item values survive.
-              const updated = await github.graphql(`
-                mutation($fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
-                  updateProjectV2Field(input: {
-                    fieldId: $fieldId
-                    singleSelectOptions: $options
-                  }) {
-                    projectV2Field {
-                      ... on ProjectV2SingleSelectField {
-                        options { id name }
-                      }
-                    }
-                  }
-                }
-              `, {
-                fieldId: statusField.id,
-                options: [
-                  ...statusField.options.map(({ id, name, color, description }) => ({ id, name, color, description })),
-                  { name: 'In Review', color: 'YELLOW', description: 'Pull request open for review' },
-                ],
-              });
-              option = updated.updateProjectV2Field.projectV2Field.options.find(o => o.name === targetStatus);
-            }
-            if (!option) {
-              core.setFailed(`Status option '${targetStatus}' was not found.`);
-              return;
-            }
-
-            await github.graphql(`
-              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: $projectId
-                  itemId: $itemId
-                  fieldId: $fieldId
-                  value: { singleSelectOptionId: $optionId }
-                }) {
-                  projectV2Item { id }
-                }
-              }
-            `, {
-              projectId: project.id,
-              itemId: item.id,
-              fieldId: statusField.id,
-              optionId: option.id,
-            });
-
-            core.info(`Issue #${issueNumber}: Status -> ${targetStatus}`);
+            const { syncProjectStatus } = require('./.github/scripts/project-status.cjs');
+            await syncProjectStatus({ github, context, core });
