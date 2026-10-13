@@ -9,7 +9,7 @@ const MAX_UNCOMPRESSED_BYTES = 8_000_000;
 
 export interface XlsxWorkbook {
   sheets: { name: string; headers: string[] }[];
-  rowsBySheet: Map<string, string[][]>;
+  rowsBySheet: Map<string, Array<Array<string | number>>>;
 }
 
 /** Parse only a small, ordinary XLSX ZIP. Reject encrypted and oversized archives before inflation. */
@@ -31,13 +31,13 @@ export async function readXlsxWorkbook(base64: string): Promise<XlsxWorkbook> {
   }
   if (!workbook.worksheets.length || workbook.worksheets.length > MAX_SHEETS) throw new Error(`XLSX must have 1–${MAX_SHEETS} sheets`);
   const sheets: XlsxWorkbook["sheets"] = [];
-  const rowsBySheet = new Map<string, string[][]>();
+  const rowsBySheet = new Map<string, Array<Array<string | number>>>();
   for (const sheet of workbook.worksheets) {
     if (sheet.rowCount > MAX_ROWS || sheet.columnCount > MAX_COLUMNS) throw new Error(`XLSX sheet exceeds ${MAX_ROWS} rows or ${MAX_COLUMNS} columns`);
-    const rows: string[][] = [];
+    const rows: Array<Array<string | number>> = [];
     for (let rowNumber = 1; rowNumber <= sheet.rowCount; rowNumber++) {
       const row = sheet.getRow(rowNumber);
-      const values: string[] = [];
+      const values: Array<string | number> = [];
       for (let column = 1; column <= sheet.columnCount; column++) {
         const cell = row.getCell(column);
         if (cell.type === ExcelJS.ValueType.Formula) throw new Error("XLSX formulas are not supported; export values instead");
@@ -45,7 +45,7 @@ export async function readXlsxWorkbook(base64: string): Promise<XlsxWorkbook> {
       }
       rows.push(values);
     }
-    sheets.push({ name: sheet.name, headers: rows[0]?.map((value) => value.trim().replace(/^\uFEFF/, "")) ?? [] });
+    sheets.push({ name: sheet.name, headers: rows[0]?.map((value) => String(value).trim().replace(/^\uFEFF/, "")) ?? [] });
     rowsBySheet.set(sheet.name, rows);
   }
   return { sheets, rowsBySheet };
@@ -54,13 +54,30 @@ export async function readXlsxWorkbook(base64: string): Promise<XlsxWorkbook> {
 export function parseXlsxSheet(workbook: XlsxWorkbook, sheetName: string, mapping: CsvColumnMapping): CsvParseResult {
   const rows = workbook.rowsBySheet.get(sheetName);
   if (!rows) throw new Error("XLSX sheet was not found");
-  return parseTabularTransactions(rows, mapping, "xlsx");
+  // Native Excel numbers use a dot as their decimal point, regardless of locale.
+  // Preserve their cell type until mapping: a comma-based CSV profile must not
+  // interpret 1.234 as a grouping-formatted 1234 euro amount.
+  const normalize = (value: string) => value.trim().replace(/^\uFEFF/, "").toLowerCase();
+  const headers = rows[0]?.map((value) => normalize(String(value))) ?? [];
+  const amountColumns = new Set(
+    [mapping.amount, mapping.debit, mapping.credit]
+      .filter((name): name is string => Boolean(name))
+      .map((name) => headers.indexOf(normalize(name))),
+  );
+  const mappedRows = rows.map((row) => row.map((value, column) => {
+    if (typeof value !== "number") return value;
+    const numeric = String(value);
+    return amountColumns.has(column) && mapping.decimalSeparator === ","
+      ? numeric.replace(".", ",")
+      : numeric;
+  }));
+  return parseTabularTransactions(mappedRows, mapping, "xlsx");
 }
 
-function cellValue(value: ExcelJS.CellValue): string {
+function cellValue(value: ExcelJS.CellValue): string | number {
   if (value == null) return "";
   if (value instanceof Date) return value.toISOString().slice(0, 10);
-  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "string" || typeof value === "number") return value;
   if (typeof value === "object" && "text" in value && typeof value.text === "string") return value.text;
   throw new Error("XLSX contains an unsupported cell value");
 }
