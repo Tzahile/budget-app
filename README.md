@@ -20,8 +20,8 @@ available to spend.
 - explicit synthetic demo dataset
 - guarded demo cleanup: only a fully provenance-marked demo dataset can be removed, after typing `DELETE DEMO DATA`
 - pure financial calculation tests
-- canonical transaction ingestion with a validated CSV adapter, atomic row-level history, and retry-safe import runs
-- CSV import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
+- canonical transaction ingestion with validated CSV and XLSX adapters, atomic row-level history, and retry-safe import runs
+- CSV/XLSX import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
 - explicit review of detected owned-account transfers from imported transactions
 - authenticated versioned JSON backup download of canonical and audit data
 - documented provider-neutral Open Banking architecture, consent boundary, and
@@ -36,30 +36,54 @@ for schema-change conventions,
 the Open Banking integration boundary, and [`ROADMAP.md`](ROADMAP.md) for
 remaining Open Banking and React Native work.
 
-## Local checks
+## Local checks and PR validation
+
+During implementation, run focused checks for the files and behaviors you change;
+for example, `npx vitest run tests/<relevant-test>.test.ts` or
+`npx eslint <changed-file>`. Use broader local checks only when investigating a
+failure. Do not routinely repeat the entire test, typecheck, lint, and Deno
+matrix as an agent's final validation step.
+
+On every pull request, [GitHub Actions CI](.github/workflows/ci.yml) runs
+`npm ci`, the full Vitest suite, TypeScript typechecking, ESLint, and the Deno
+module graph check. The required status check is displayed as
+**CI / Validate** (job name `Validate`, GitHub Actions). Wait for that check
+to succeed before merging. On `main`, the deployment workflow separately
+checks the revision and deploys to Val Town.
+
+For occasional full local verification:
 
 ```sh
 npm ci
-npm run check
-```
-
-The deployed module graph can also be checked with Deno:
-
-```sh
+npm run test
+npm run typecheck
+npm run lint
 deno check --no-lock --allow-import=esm.town,esm.sh index.http.ts frontend/index.tsx
 ```
 
+**Repository owner setup (once):** In GitHub, open **Settings → Rules →
+Rulesets → New branch ruleset**. Target `main`; require a pull request before
+merging and require status checks to pass. Add the `Validate` check from
+**GitHub Actions** (`CI / Validate` in the checks UI), then activate the
+ruleset. Do not consider CI merge enforcement complete until a failing or
+pending check prevents merging. A passing check alone is not branch protection.
+
 No real financial data, statements or credentials belong in this repository.
 
-## CSV import
+## CSV and XLSX import
 
-In **Activity → Import bank CSV**, choose an account and CSV file. Map date,
+In **Activity → Import bank CSV or XLSX**, choose an account and file. For XLSX,
+select the worksheet containing transactions; the same saved CSV mapping profiles
+also apply to XLSX. Map date,
 description, and either a signed amount or separate positive debit/credit
 columns. Optionally map bank transaction ID and status. Choose the source date
 format and decimal separator, then preview rows. Any invalid row blocks import;
 the preview shows row numbers and safe error summaries. Save a mapping profile
 to reuse, edit, or delete it later. The server still routes valid rows through
 canonical ingestion, including duplicate handling and transfer detection.
+XLSX supports up to 500 KB compressed, 20 worksheets, 2,000 rows per sheet,
+30 columns per sheet, and 8 MB total uncompressed ZIP contents. Encrypted,
+corrupt, and formula-containing workbooks are rejected; export values instead.
 
 ## Deployment
 

@@ -2,7 +2,7 @@ import { assertDateOnly } from "../shared/finance.ts";
 import type { Transaction, TransactionKind } from "../shared/types.ts";
 import { ValidationError, uuidField } from "./validation.ts";
 
-export type ActivitySource = "manual" | "planned" | "csv" | "open_banking";
+export type ActivitySource = "manual" | "planned" | "csv" | "xlsx" | "open_banking";
 export interface TransactionFilters {
   accountId?: string;
   from?: string;
@@ -34,7 +34,7 @@ export function parseTransactionFilters(params: URLSearchParams): TransactionFil
   const kind = params.get("kind") ?? undefined;
   if (kind && !["income", "expense", "refund", "transfer"].includes(kind)) throw new ValidationError("kind is invalid");
   const source = params.get("source") ?? undefined;
-  if (source && !["manual", "planned", "csv", "open_banking"].includes(source)) throw new ValidationError("source is invalid");
+  if (source && !["manual", "planned", "csv", "xlsx", "open_banking"].includes(source)) throw new ValidationError("source is invalid");
   const search = params.get("search")?.trim() ?? undefined;
   if (search && search.length > 160) throw new ValidationError("search is too long");
   const limitString = params.get("limit");

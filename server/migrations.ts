@@ -239,6 +239,20 @@ export const migrations: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    version: 12,
+    name: "XLSX ingestion source",
+    statements: [
+      "CREATE TABLE migration_import_sources AS SELECT id, source FROM imports",
+      "DROP INDEX imports_retry_key_idx",
+      "ALTER TABLE imports DROP COLUMN source",
+      "ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'csv' CHECK (source IN ('csv', 'xlsx', 'open_banking'))",
+      "UPDATE imports SET source = (SELECT source FROM migration_import_sources WHERE migration_import_sources.id = imports.id)",
+      "DROP TABLE migration_import_sources",
+      `CREATE UNIQUE INDEX imports_retry_key_idx
+        ON imports(source, account_id, retry_key) WHERE retry_key IS NOT NULL`,
+    ],
+  },
 ];
 
 export async function migrateDatabase(

@@ -71,7 +71,7 @@ describe("authenticated portable backup", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const serialized = await response.text();
     const backup = JSON.parse(serialized) as BudgetBackup;
-    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 2, schemaVersion: 11 });
+    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 3, schemaVersion: 12 });
     expect(Number.isNaN(Date.parse(backup.exportedAt))).toBe(false);
     expect(Object.keys(backup.data).sort()).toEqual(Object.keys(BACKUP_TABLES).sort());
     expect(backup.data.transactions).toHaveLength(503);
@@ -91,7 +91,7 @@ describe("authenticated portable backup", () => {
   });
 
   it("fails closed when new schema data has not been reviewed for portability", async () => {
-    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (12, '2026-09-01')").run();
+    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (13, '2026-09-01')").run();
     const response = await request("/api/export");
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "Unexpected server error" });

@@ -47,6 +47,12 @@ describe("server-backed transaction search", () => {
     expect((await listTransactions({ limit: 50, accountId, from: "2026-09-29", to: "2026-09-29", kind: "expense", source: "csv", search: "100%" })).items.map((item) => item.activitySource)).toEqual(["csv"]);
     expect((await listTransactions({ limit: 50, source: "open_banking" })).items.map((item) => item.description)).toEqual(["Synthetic bank credit"]);
     expect((await listTransactions({ limit: 50, source: "planned" })).items).toEqual([]);
+    await ingestTransactions({ accountId, filename: "synthetic.xlsx", source: "xlsx", transactions: [
+      { occurredOn: "2026-10-01", amountCents: -150, description: "Synthetic XLSX import", externalId: "xlsx-search" },
+    ] });
+    expect((await listTransactions({ limit: 50, source: "xlsx" })).items.map((item) => item.activitySource)).toEqual(["xlsx"]);
+    expect((await listTransactions({ limit: 50, source: "csv" })).items.map((item) => item.activitySource)).toEqual(["csv"]);
+    expect(parseTransactionFilters(new URLSearchParams("source=xlsx")).source).toBe("xlsx");
   });
 
   it("rejects malformed filters and cursors", async () => {
