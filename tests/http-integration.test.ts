@@ -38,6 +38,8 @@ describe("Hono financial API security integration", () => {
     const send = await request("/api/ai/advice", { method: "POST", headers, body: JSON.stringify({ payload: preview.payload, confirmed: true }) });
     expect(send.status).toBe(503);
     expect(await send.json()).toMatchObject({ code: "disabled" });
+    const edited = JSON.stringify({ schemaVersion: 2, valueOrigin: "user_edited", currency: "EUR", asOfMonth: "2026-10", currentCashCents: -1234 });
+    expect((await request("/api/ai/advice", { method: "POST", headers, body: JSON.stringify({ payload: edited, confirmed: true }) })).status).toBe(503);
     expect(await (await request("/api/data")).json()).toEqual(before);
   });
   it("previews XLSX sheets, imports via saved CSV mapping, and deduplicates across formats", async () => {

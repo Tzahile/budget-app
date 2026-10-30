@@ -2,6 +2,7 @@ declare module "https://esm.sh/react@18.2.0" {
   export const useCallback: typeof import("react").useCallback;
   export const useEffect: typeof import("react").useEffect;
   export const useMemo: typeof import("react").useMemo;
+  export const useReducer: typeof import("react").useReducer;
   export const useState: typeof import("react").useState;
   export type ReactNode = import("react").ReactNode;
   export type FormEvent<T = Element> = import("react").FormEvent<T>;
