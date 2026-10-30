@@ -67,9 +67,9 @@ export function completePlannedStatements(input: {
       sql: `INSERT INTO transactions
         (id, account_id, date, amount_cents, currency, description, kind, status, source,
          planned_transaction_id, created_at, updated_at)
-        SELECT ?, ?, ?, ?, 'EUR', ?, ?, 'cleared', 'planned', ?, ?, ?
+        SELECT ?, ?, ?, ?, (SELECT currency FROM planned_transactions WHERE id = ?), ?, ?, 'cleared', 'planned', ?, ?, ?
         WHERE EXISTS (SELECT 1 FROM planned_transactions WHERE id = ? AND latest_completion_id = ? AND revision = ?)`,
-      args: [transactionId, targetAccountId, actualDate, signedAmount, item.description, item.kind, item.id, now, now,
+      args: [transactionId, targetAccountId, actualDate, signedAmount, item.id, item.description, item.kind, item.id, now, now,
         item.id, completionId, completedRevision],
     },
     {

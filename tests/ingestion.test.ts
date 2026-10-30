@@ -138,3 +138,25 @@ describe("CSV canonical ingestion adapter", () => {
     expect(plan).toMatchObject({ importedCount: 0, ambiguousCount: 0, errorCount: 2 });
   });
 });
+
+
+describe("ingestion denominations", () => {
+  it("preserves mapped currency and defaults only absent currency to the target account", async () => {
+    const result = parseCsvTransactions("Date,Amount,Description,Currency\n2026-09-16,-2.00,Synthetic,USD\n", { date: "Date", amount: "Amount", description: "Description", currency: "Currency" });
+    expect(result.transactions[0].currency).toBe("USD");
+    const [prepared] = await prepareCanonicalTransactions({ source: "csv", accountId: "usd-account", accountCurrency: "USD", transactions: result.transactions });
+    expect(prepared.currency).toBe("USD");
+    const [implicit] = await prepareCanonicalTransactions({ source: "csv", accountId: "usd-account", accountCurrency: "USD", transactions: [{ occurredOn: "2026-09-16", amountCents: -200, description: "Synthetic" }] });
+    expect(implicit.currency).toBe("USD");
+    await expect(prepareCanonicalTransactions({ source: "csv", accountId: "eur-account", transactions: result.transactions })).rejects.toThrow("Mixed-currency");
+    const plan = ingestionWritePlan({ importId: "run", accountId: "usd-account", filename: "synthetic.csv", source: "csv", now: "2026-09-16", transactions: [prepared], assessments: [{ transaction: prepared, decision: "accepted", reason: "new_identity" }] });
+    const insert = plan.statements.find((statement) => typeof statement !== "string" && statement.sql.includes("INSERT OR IGNORE INTO transactions"));
+    expect(insert).toMatchObject({ args: expect.arrayContaining(["USD"]) });
+  });
+
+  it("rejects malformed mapped currency without retaining source text in row errors", () => {
+    const result = parseCsvTransactions("Date,Amount,Description,Currency\n2026-09-16,2.00,Synthetic,SECRET_INVALID\n", { date: "Date", amount: "Amount", description: "Description", currency: "Currency" });
+    expect(result.transactions).toEqual([]);
+    expect(result.rowErrors).toEqual([{ sourcePosition: 2, code: "invalid_currency", summary: "Currency is invalid" }]);
+  });
+});

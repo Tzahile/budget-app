@@ -88,3 +88,11 @@ describe("ingested internal transfer detection", () => {
     expect(data.transactions.filter((transaction) => transaction.description.startsWith("Not transfer") && transaction.kind === "transfer")).toHaveLength(0);
   });
 });
+
+
+it("never matches equal minor-unit amounts across different denominations", () => {
+  expect(detectIngestedTransferPairs([
+    { id: "debit", accountId: "eur", occurredOn: "2026-09-16", amountCents: -1000, currency: "EUR" },
+    { id: "credit", accountId: "usd", occurredOn: "2026-09-16", amountCents: 1000, currency: "USD" },
+  ])).toEqual([]);
+});

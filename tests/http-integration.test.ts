@@ -172,3 +172,24 @@ describe("Hono financial API security integration", () => {
     expect((await request("/api/imports", {}, null)).status).toBe(401);
   });
 });
+
+it("shows source denominations and blocks foreign currencies even beyond the preview sample", async () => {
+  const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+  const mapping = { date: "Date", amount: "Amount", description: "Description", currency: "Currency" };
+  const csv = "Date,Amount,Description,Currency\n" + Array.from({ length: 6 }, (_, index) => `2026-09-16,-2.00,Synthetic,${index === 5 ? "USD" : "EUR"}\n`).join("");
+  const preview = await request("/api/imports/csv/preview", { method: "POST", headers, body: JSON.stringify({ csv, mapping }) });
+  expect(preview.status).toBe(200);
+  expect(await preview.json()).toMatchObject({ validCount: 6, unsupportedCurrencyCount: 1, sample: Array.from({ length: 5 }, () => expect.objectContaining({ currency: "EUR" })) });
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Synthetic");
+  sheet.addRow(["Date", "Amount", "Description", "Currency"]);
+  sheet.addRow(["2026-09-16", -2, "Synthetic", "USD"]);
+  const xlsx = Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64");
+  const xlsxPreview = await request("/api/imports/xlsx/preview", { method: "POST", headers, body: JSON.stringify({ xlsx, mapping }) });
+  expect(xlsxPreview.status).toBe(200);
+  expect(await xlsxPreview.json()).toMatchObject({ unsupportedCurrencyCount: 1, sample: [{ currency: "USD", amountCents: -200 }] });
+  const before = database.prepare("SELECT COUNT(*) AS count FROM accounts").get();
+  const rejected = await request("/api/accounts", { method: "POST", headers, body: JSON.stringify({ name: "Synthetic foreign", type: "checking", balanceCents: 200, currency: "USD" }) });
+  expect(rejected.status).toBe(422);
+  expect(database.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual(before);
+});

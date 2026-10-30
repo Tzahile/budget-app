@@ -1,3 +1,4 @@
+import { currencyField } from "../server/validation.ts";
 import { describe, expect, it } from "vitest";
 import { centsField, dateField, exactStringField, objectBody, uuidField, ValidationError } from "../server/validation.ts";
 
@@ -20,4 +21,13 @@ describe("request validation errors", () => {
       expect((error as Error).message.length).toBeGreaterThan(0);
     }
   });
+});
+
+
+it("defaults absent request currency to EUR and rejects foreign or malformed declarations", () => {
+  expect(currencyField({})).toBe("EUR");
+  expect(currencyField({ currency: "EUR" })).toBe("EUR");
+  for (const currency of ["USD", "eur", "", null, 978, "EUR "]) {
+    expect(() => currencyField({ currency })).toThrow();
+  }
 });

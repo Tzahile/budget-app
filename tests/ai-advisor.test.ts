@@ -106,3 +106,13 @@ describe("redacted AI boundary", () => {
     expect(() => createRedactedFinancialSnapshot(invalid)).toThrow("safe integer");
   });
 });
+
+
+it("refuses to relabel non-EUR or mixed projection amounts in AI snapshots", () => {
+  const source = dashboard();
+  source.currency = "USD";
+  expect(() => createRedactedFinancialSnapshot(source)).toThrow("Only EUR");
+  source.currency = "EUR";
+  source.projectionMonths[0].currency = "USD";
+  expect(() => createRedactedFinancialSnapshot(source)).toThrow("Mixed-currency");
+});
