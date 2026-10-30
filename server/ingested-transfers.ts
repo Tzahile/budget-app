@@ -1,3 +1,4 @@
+import { DEFAULT_CURRENCY } from "../shared/currency.ts";
 import type { MigrationStatement } from "./migrations.ts";
 
 /** Bank posting dates can differ between owned accounts. Keep this narrow to limit false positives. */
@@ -8,6 +9,7 @@ export interface TransferDetectionTransaction {
   accountId: string;
   occurredOn: string;
   amountCents: number;
+  currency?: string;
 }
 
 export interface IngestedTransferPair {
@@ -28,6 +30,7 @@ export function detectIngestedTransferPairs(
   for (const debit of outgoing) {
     for (const credit of incoming) {
       if (debit.accountId === credit.accountId) continue;
+      if ((debit.currency ?? DEFAULT_CURRENCY) !== (credit.currency ?? DEFAULT_CURRENCY)) continue;
       if (-debit.amountCents !== credit.amountCents) continue;
       if (calendarDayDistance(debit.occurredOn, credit.occurredOn) > dateToleranceDays) continue;
       pairs.push({ outgoingTransactionId: debit.id, incomingTransactionId: credit.id });
@@ -70,6 +73,7 @@ export function decideTransferCandidateStatements(input: {
                 AND outgoing.status = 'cleared' AND incoming.status = 'cleared'
                 AND outgoing.kind = 'expense' AND incoming.kind = 'income'
                 AND outgoing.account_id <> incoming.account_id
+                AND outgoing.currency = incoming.currency
                 AND outgoing.amount_cents = -incoming.amount_cents
                 AND outgoing.transfer_group_id IS NULL AND incoming.transfer_group_id IS NULL
             )`,

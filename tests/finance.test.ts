@@ -26,6 +26,31 @@ const reserve = (amountCents: number, overrides: Partial<Reserve> = {}): Reserve
   createdAt: now, updatedAt: now, ...overrides,
 });
 
+describe("currency boundaries", () => {
+  it("labels every deterministic result and occurrence with its denomination", () => {
+    const result = calculateDashboard({ asOfDate: "2026-09-12", accounts: [account(100_000)], transactions: [], plannedTransactions: [planned()], reserves: [] });
+    expect(result.currency).toBe("EUR");
+    expect(result.upcoming[0].currency).toBe("EUR");
+    expect(result.projectionMonths.every((month) => month.currency === "EUR")).toBe(true);
+    const future = calculateDashboard({ currency: "USD", asOfDate: "2026-09-12", accounts: [account(100_000, { currency: "USD" })], transactions: [], plannedTransactions: [], reserves: [] });
+    expect(future.currency).toBe("USD");
+    expect(future.currentCashCents).toBe(100_000);
+    expect(future.projectionMonths[0].currency).toBe("USD");
+  });
+
+  it("refuses mixed denominations across accounts, spending, commitments and reserves", () => {
+    const base = { asOfDate: "2026-09-12", accounts: [account(100_000)], transactions: [] as Transaction[], plannedTransactions: [] as PlannedTransaction[], reserves: [] as Reserve[] };
+    const mixed = [
+      { ...base, accounts: [account(100_000), account(0, { currency: "USD", isActive: false })] },
+      { ...base, transactions: [transaction(-1_000, { currency: "USD" })] },
+      { ...base, plannedTransactions: [planned({ currency: "USD" })] },
+      { ...base, reserves: [reserve(1_000, { currency: "USD" })] },
+    ];
+    for (const input of mixed) expect(() => calculateDashboard(input)).toThrow("Mixed-currency");
+    expect(() => calculateCashFlowProjection({ ...base, plannedTransactions: [planned({ currency: "USD" })] })).toThrow("Mixed-currency");
+  });
+});
+
 describe("calculateDashboard", () => {
   it("calculates the core cash-flow equation without double counting recorded transactions", () => {
     const result = calculateDashboard({

@@ -4,6 +4,7 @@ import type { ButtonHTMLAttributes, FormEvent, ReactNode } from "https://esm.sh/
 import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppData, type PlannedCompletion, type PlannedTransaction, type Reserve, type Transaction } from "../../shared/types.ts";
 import type { ActivitySource, TransactionPage } from "../../server/transaction-search.ts";
 import { householdDate } from "../../shared/finance.ts";
+import { DEFAULT_CURRENCY } from "../../shared/currency.ts";
 import { CsvImport } from "./CsvImport.tsx";
 
 type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
@@ -475,7 +476,7 @@ function parseMoney(raw: string, allowNegative = false): number {
   if (!Number.isSafeInteger(cents)) throw new Error("Amount is too large");
   return negative ? -cents : cents;
 }
-function money(cents: number): string { return new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(cents / 100); }
+function money(cents: number): string { return new Intl.NumberFormat("en-IE", { style: "currency", currency: DEFAULT_CURRENCY }).format(cents / 100); }
 function euros(cents: number): string { return `${cents < 0 ? "-" : ""}${Math.floor(Math.abs(cents) / 100)}.${String(Math.abs(cents) % 100).padStart(2, "0")}`; }
 function today(): string { return householdDate(); }
 function prettyDate(date: string): string { return new Date(`${date}T12:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }); }

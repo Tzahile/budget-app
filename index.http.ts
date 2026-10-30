@@ -1,3 +1,4 @@
+import { DEFAULT_CURRENCY } from "./shared/currency.ts";
 // Val Town infers the HTTP trigger from the `.http.ts` filename.
 import { Hono } from "npm:hono@4.13.7";
 import { getOAuthUserData, oauthMiddleware } from "https://esm.town/v/std/oauth/middleware.ts";
@@ -48,6 +49,7 @@ import {
   exactStringField,
   integerField,
   objectBody,
+  currencyField,
   optionalString,
   signedCentsField,
   stringField,
@@ -186,7 +188,7 @@ app.post("/api/imports/csv/preview", async (c) => {
   const headers = csvHeaders(csv);
   if (!body.mapping) return c.json({ headers });
   const parsed = parseCsvTransactions(csv, csvMapping(body.mapping));
-  return c.json({ headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
+  return c.json({ headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), unsupportedCurrencyCount: parsed.transactions.filter((row) => row.currency !== undefined && row.currency !== DEFAULT_CURRENCY).length, rowErrors: parsed.rowErrors });
 });
 
 app.post("/api/imports/xlsx/preview", async (c) => {
@@ -199,7 +201,7 @@ app.post("/api/imports/xlsx/preview", async (c) => {
   let parsed;
   try { parsed = parseXlsxSheet(workbook, sheet, csvMapping(body.mapping)); }
   catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX mapping is invalid"); }
-  return c.json({ sheets: workbook.sheets.map(({ name }) => name), sheet, headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
+  return c.json({ sheets: workbook.sheets.map(({ name }) => name), sheet, headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), unsupportedCurrencyCount: parsed.transactions.filter((row) => row.currency !== undefined && row.currency !== DEFAULT_CURRENCY).length, rowErrors: parsed.rowErrors });
 });
 
 app.get("/api/imports/csv/profiles", async (c) => c.json({ profiles: await listCsvMappingProfiles() }));
@@ -395,7 +397,9 @@ function isAuthorized(username: string | null): boolean {
 }
 
 async function readBody(request: Request): Promise<Record<string, unknown>> {
-  return readJsonObject(request);
+  const body = await readJsonObject(request);
+  currencyField(body);
+  return body;
 }
 
 function safeId(value: string): string {
@@ -414,6 +418,7 @@ function csvMapping(value: unknown): CsvColumnMapping {
     description: stringField(mapping, "description", 100),
     externalId: optionalString(mapping, "externalId", 100) ?? undefined,
     status: optionalString(mapping, "status", 100) ?? undefined,
+    currency: optionalString(mapping, "currency", 100) ?? undefined,
     dateFormat: mapping.dateFormat == null ? undefined : enumField(mapping, "dateFormat", ["iso", "day_first", "month_first"] as const),
     decimalSeparator: mapping.decimalSeparator == null ? undefined : enumField(mapping, "decimalSeparator", [",", "."] as const),
   };
