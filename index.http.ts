@@ -57,6 +57,8 @@ import {
   ValidationError,
 } from "./server/validation.ts";
 
+import { createAndroidNotificationRoutes } from "./server/android-notifications.ts";
+
 const app = new Hono();
 
 app.use("*", async (c, next) => {
@@ -87,6 +89,8 @@ app.use("/api/*", async (c, next) => {
   }
   await next();
 });
+
+app.route("/api/notifications/android", createAndroidNotificationRoutes(() => Deno.env.get("BUDGET_APP_ANDROID_NOTIFICATIONS_ENABLED") === "true"));
 
 app.get("/api/data", async (c) => {
   const asOf = c.req.query("asOf") || householdDate();

@@ -64,7 +64,7 @@ export interface IngestionRun {
   id: string;
   accountId: string | null;
   filename: string;
-  source: "csv" | "xlsx" | "open_banking";
+  source: "csv" | "xlsx" | "open_banking" | "android_notification";
   status: "processing" | "completed" | "failed";
   rowCount: number;
   acceptedCount: number;

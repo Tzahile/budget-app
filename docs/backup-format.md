@@ -7,7 +7,7 @@ It contains sensitive household finances: store it in a protected location.
 No export contents are logged by the server.
 
 The root object has `format: "budgetapp-backup"`, `formatVersion: 3`,
-`schemaVersion: 13`, an ISO UTC `exportedAt` timestamp, and `data`.
+`schemaVersion: 14`, an ISO UTC `exportedAt` timestamp, and `data`.
 `data` maps database table names to arrays of rows sorted by `id`. Column names
 are the original snake_case schema names, nullable values remain `null`,
 booleans are SQLite `0` or `1`, and money remains integer EUR cents.
@@ -33,3 +33,7 @@ decisions remain in the artifact. When Open Banking storage is introduced,
 provider-neutral account mapping and safe sync checkpoints must be explicitly
 reviewed and added in a later format version; encrypted provider secrets stay
 excluded.
+
+Schema 14 adds optional notification ingestion and an internal request fingerprint.
+The existing portable source field includes `android_notification`; delivery retry
+keys, request fingerprints and raw audit metadata remain excluded.

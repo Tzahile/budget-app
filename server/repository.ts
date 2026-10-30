@@ -238,6 +238,7 @@ export async function ingestTransactions(input: {
   transactions: readonly CanonicalTransactionInput[];
   rowErrors?: readonly IngestionRowError[];
   retryKey?: string | null;
+  retryFingerprint?: string | null;
 }): Promise<{
   importId: string;
   importedCount: number;
@@ -248,12 +249,20 @@ export async function ingestTransactions(input: {
 }> {
   await ensureSchema();
   const retryKey = normalizeRetryKey(input.retryKey);
+  if (input.source === "android_notification" && (
+    !retryKey || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(retryKey) ||
+    !/^[0-9a-f]{64}$/.test(input.retryFingerprint ?? "") || input.transactions.length !== 1 ||
+    input.transactions[0].externalId != null || input.transactions[0].auditMetadata?.adapter !== "android_notification"
+  )) throw Object.assign(new Error("Notification ingestion requires one normalized event and a bound delivery retry identity"), { status: 400 });
   if (retryKey) {
     const previous = await one(
-      "SELECT * FROM imports WHERE source = ? AND account_id = ? AND retry_key = ?",
+      "SELECT * FROM imports WHERE source = ? AND (account_id = ? OR source = 'android_notification') AND retry_key = ?",
       [input.source, input.accountId, retryKey],
     );
-    if (previous) return replayIngestion(previous);
+    if (previous) {
+      assertRetryFingerprint(previous, input.retryFingerprint);
+      return replayIngestion(previous);
+    }
   }
   const rowErrors = input.rowErrors ?? [];
   if (!input.transactions.length && !rowErrors.length) {
@@ -275,6 +284,34 @@ export async function ingestTransactions(input: {
     for (const row of result.rows) existing.add(String((row as Row).import_identity));
   }
   const assessments = assessIngestionDuplicates(prepared, existing);
+  // Notification IDs identify deliveries, not bank transactions. One bounded
+  // read assesses coarse facts across all adapters without per-row DB queries.
+  if (prepared.length) {
+    const dates = prepared.map((transaction) => transaction.occurredOn).sort();
+    const possibleOverlaps = await db.execute({
+      sql: `SELECT date, amount_cents FROM transactions
+        WHERE account_id = ? AND source = 'import' AND voided_at IS NULL
+          AND date BETWEEN date(?, '-3 days') AND date(?, '+3 days')
+          AND (? = 'android_notification' OR json_extract(raw_metadata, '$.adapter') = 'android_notification')`,
+      args: [input.accountId, dates[0], dates.at(-1)!, input.source],
+    });
+    const daysByAmount = new Map<number, number[]>();
+    for (const row of possibleOverlaps.rows) {
+      const amount = Number(row.amount_cents);
+      const days = daysByAmount.get(amount) ?? [];
+      days.push(Date.parse(String(row.date)) / 86_400_000);
+      daysByAmount.set(amount, days);
+    }
+    for (const assessment of assessments) {
+      if (assessment.decision !== "accepted") continue;
+      const transaction = assessment.transaction;
+      const day = Date.parse(transaction.occurredOn) / 86_400_000;
+      if (daysByAmount.get(transaction.amountCents)?.some((previousDay) => Math.abs(previousDay - day) <= 3)) {
+        assessment.decision = "ambiguous";
+        assessment.reason = "notification_overlap";
+      }
+    }
+  }
   const ambiguous = assessments.filter((assessment) => assessment.decision === "ambiguous");
   const importId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -284,7 +321,7 @@ export async function ingestTransactions(input: {
     const errorSummary = rejectedRunSummary(rowErrors.length, ambiguous.length);
     const plan = rejectedIngestionWritePlan({
       importId, accountId: input.accountId, filename: input.filename, source: input.source,
-      transactions: prepared, assessments, rowErrors, errorSummary, retryKey, now,
+      transactions: prepared, assessments, rowErrors, errorSummary, retryKey, retryFingerprint: input.retryFingerprint, now,
     });
     const replayed = await writeIngestionPlan(plan.statements, retryKey, input);
     if (replayed) return replayed;
@@ -295,7 +332,7 @@ export async function ingestTransactions(input: {
   }
   const plan = ingestionWritePlan({
     importId, accountId: input.accountId, filename: input.filename, source: input.source,
-    transactions: prepared, assessments, retryKey, now,
+    transactions: prepared, assessments, retryKey, retryFingerprint: input.retryFingerprint, now,
   });
   const eligible = await db.execute(`SELECT id, account_id, date, amount_cents, currency FROM transactions
     WHERE source = 'import' AND status = 'cleared' AND kind IN ('income', 'expense')
@@ -354,7 +391,7 @@ export async function getIngestionHistory(limit = 50): Promise<IngestionRun[]> {
 async function writeIngestionPlan(
   statements: Parameters<typeof db.batch>[0],
   retryKey: string | null,
-  input: { source: IngestionSource; accountId: string },
+  input: { source: IngestionSource; accountId: string; retryFingerprint?: string | null },
 ): Promise<ReturnType<typeof replayIngestion> | null> {
   try {
     await db.batch(statements);
@@ -364,12 +401,24 @@ async function writeIngestionPlan(
     // rolls back the losing batch, so returning the committed run is safe.
     if (retryKey && error instanceof Error && /constraint|unique/i.test(error.message)) {
       const previous = await one(
-        "SELECT * FROM imports WHERE source = ? AND account_id = ? AND retry_key = ?",
+        "SELECT * FROM imports WHERE source = ? AND (account_id = ? OR source = 'android_notification') AND retry_key = ?",
         [input.source, input.accountId, retryKey],
       );
-      if (previous) return replayIngestion(previous);
+      if (previous) {
+        assertRetryFingerprint(previous, input.retryFingerprint);
+        return replayIngestion(previous);
+      }
+    }
+    if (error instanceof Error && error.message.includes("Possible notification overlap")) {
+      throw conflict("Possible notification overlap; reconcile before importing");
     }
     throw error;
+  }
+}
+
+function assertRetryFingerprint(row: Row, fingerprint?: string | null): void {
+  if (fingerprint != null && row.request_fingerprint !== fingerprint) {
+    throw conflict("This delivery ID was already used for different reviewed data");
   }
 }
 
