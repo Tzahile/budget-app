@@ -266,12 +266,14 @@ export const migrations: readonly Migration[] = [
         country_code TEXT NOT NULL,
         status TEXT NOT NULL CHECK (status IN ('connected', 'reauth_required', 'disconnected', 'error')),
         consent_expires_at TEXT,
+        sync_revision INTEGER NOT NULL DEFAULT 0,
         last_synced_at TEXT,
         safe_error_code TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(provider, provider_connection_id)
       )`,
+      "CREATE TABLE bank_sync_guards (claim INTEGER NOT NULL CHECK (claim = 1))",
       `CREATE TABLE bank_account_links (
         connection_id TEXT NOT NULL REFERENCES bank_connections(id) ON DELETE CASCADE,
         provider_account_id TEXT NOT NULL,
@@ -281,6 +283,14 @@ export const migrations: readonly Migration[] = [
         UNIQUE(connection_id, account_id)
       )`,
       "CREATE INDEX bank_account_links_account_idx ON bank_account_links(account_id)",
+      `CREATE TABLE bank_account_identities (
+        provider TEXT NOT NULL,
+        institution_id TEXT NOT NULL,
+        identity_hash TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        PRIMARY KEY (provider, institution_id, identity_hash),
+        UNIQUE (provider, institution_id, account_id)
+      )`,
       `CREATE TABLE bank_consent_attempts (
         id TEXT PRIMARY KEY,
         state_hash TEXT NOT NULL UNIQUE,

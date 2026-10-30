@@ -3,8 +3,8 @@ import type { BankConnectionsResponse } from "../shared/types.ts";
 import { createGoCardlessClient, GoCardlessError, type GoCardlessInstitution } from "./gocardless.ts";
 import {
   consumeBankConsentAttempt, createBankConnection, createBankConsentAttempt,
-  createLinkedBankAccount, getAppData, getBankConnectionForSync,
-  hashBankConsentState, ingestBankAccountTransactions, listBankConnections,
+  applyBankConnectionSnapshot, getAppData, getBankConnectionForSync,
+  hashBankConsentState, listBankConnections,
   markBankConnection,
 } from "./repository.ts";
 
@@ -66,7 +66,7 @@ export async function beginBankConsent(input: {
     await createBankConsentAttempt({
       stateHash: await hashBankConsentState(state), ownerUsername: input.ownerUsername,
       provider, institutionId: institution.id, institutionName: institution.name,
-      providerRequisitionId: requisition.id, redirectUri,
+      providerRequisitionId: requisition.id, redirectUri: `${input.origin}/api/bank/callback`,
       expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
     });
   } catch (error) {
@@ -80,7 +80,7 @@ export async function completeBankConsent(input: {
   state: string; ownerUsername: string; origin: string;
 }, adapter: BankProviderClient = client): Promise<void> {
   if (!/^[a-f0-9]{64}$/.test(input.state)) throw safeError(400, "Invalid bank consent state");
-  const redirectUri = `${input.origin}/api/bank/callback?state=${encodeURIComponent(input.state)}`;
+  const redirectUri = `${input.origin}/api/bank/callback`;
   const attempt = await consumeBankConsentAttempt({
     stateHash: await hashBankConsentState(input.state), ownerUsername: input.ownerUsername, redirectUri,
   });
@@ -98,9 +98,10 @@ export async function completeBankConsent(input: {
 export async function syncBankConnection(id: string, adapter: BankProviderClient = client): Promise<{ importedCount: number; duplicateCount: number; accounts: number }> {
   const connection = await getBankConnectionForSync(id);
   if (!connection) throw safeError(404, "Bank connection not found");
-  if (connection.provider !== provider || connection.status !== "connected") throw safeError(409, "Bank connection requires reconnection");
+  if (connection.provider !== provider || connection.status !== "connected" || (connection.consentExpiresAt !== null && connection.consentExpiresAt <= new Date().toISOString())) throw safeError(409, "Bank connection requires reconnection");
   try {
     const requisition = await adapter.getRequisition(connection.providerConnectionId);
+    if (requisition.institutionId !== connection.institutionId) throw safeError(422, "Bank institution does not match the connection");
     if (requisition.status !== "LN" || !requisition.accounts.length) {
       await markBankConnection(id, "reauth_required", "consent_expired");
       throw safeError(409, "Bank consent requires reconnection");
@@ -114,28 +115,17 @@ export async function syncBankConnection(id: string, adapter: BankProviderClient
         adapter.getAccount(providerAccountId), adapter.getBalances(providerAccountId),
         adapter.getTransactions(providerAccountId, { from: from.toISOString().slice(0, 10), to }),
       ]);
-      if (account.status !== "READY" || transactions.length > 2000) throw safeError(422, "Bank account data is incomplete");
+      if (account.id !== providerAccountId || account.status !== "READY" || transactions.length > 2000) throw safeError(422, "Bank account data is incomplete");
       // Available balances can include pending card holds. Only a booked
       // balance can reconcile the app's cleared-transaction ledger.
       const balance = balances.find((item) => item.type === "interimBooked") ??
         balances.find((item) => item.type === "closingBooked");
       if (!balance) throw safeError(422, "Bank balance type is unsupported");
-      return { providerAccountId, name: account.name ?? "Bank account", balanceCents: balance.amountCents, transactions };
+      if (!account.iban || !/^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/.test(account.iban.replace(/\s/g, "").toUpperCase())) throw safeError(422, "Stable bank account identity is unavailable");
+      const identityHash = await hashBankConsentState(`${provider}\u001f${connection.institutionId}\u001f${account.iban.replace(/\s/g, "").toUpperCase()}`);
+      return { providerAccountId, identityHash, name: "Bank account", balanceCents: balance.amountCents, transactions };
     }));
-    let importedCount = 0;
-    let duplicateCount = 0;
-    for (const snapshot of snapshots) {
-      const accountId = await createLinkedBankAccount({
-        connectionId: id, providerAccountId: snapshot.providerAccountId, name: snapshot.name,
-      });
-      const result = await ingestBankAccountTransactions({
-        connectionId: id, accountId, provider, transactions: snapshot.transactions,
-        balanceCents: snapshot.balanceCents,
-      });
-      importedCount += result.importedCount;
-      duplicateCount += result.duplicateCount;
-    }
-    return { importedCount, duplicateCount, accounts: snapshots.length };
+    return await applyBankConnectionSnapshot({ connectionId: id, provider, expectedRevision: connection.syncRevision, accounts: snapshots });
   } catch (error) {
     if (error instanceof GoCardlessError) {
       const expired = error.status === 401 || error.status === 403;

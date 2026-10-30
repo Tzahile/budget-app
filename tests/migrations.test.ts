@@ -50,6 +50,9 @@ describe("database migrations", () => {
 
     expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     expect(columns("accounts")).toContain("is_demo");
+    expect(tableExists("bank_account_identities")).toBe(true);
+    expect(tableExists("bank_sync_guards")).toBe(true);
+    expect(columns("bank_connections")).toContain("sync_revision");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
     expect(tableExists("planned_completions")).toBe(true);

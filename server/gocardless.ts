@@ -56,23 +56,34 @@ export function createGoCardlessClient(options: {
     const headers: Record<string, string> = { Accept: "application/json" };
     if (init.body) headers["Content-Type"] = "application/json";
     if (authenticate) headers.Authorization = `Bearer ${await token()}`;
-    let response: Response;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      response = await request(`${baseUrl}${path}`, { ...init, headers, redirect: "error" });
-    } catch {
-      throw new GoCardlessError(0, "connection_error");
-    }
-    if (!response.ok) {
-      let code = "provider_error";
-      try {
-        const body = await response.json();
-        if (record(body) && typeof body.type === "string" && /^[a-zA-Z_]{1,80}$/.test(body.type)) code = body.type;
-      } catch { /* A provider error can contain HTML or an empty body. */ }
-      throw new GoCardlessError(response.status, code);
-    }
-    if (response.status === 204) return null;
-    try { return await response.json(); }
-    catch { throw new GoCardlessError(502, "malformed_response"); }
+      const response = await request(`${baseUrl}${path}`, { ...init, headers, redirect: "error", signal: controller.signal });
+      if (!response.ok) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new GoCardlessError(response.status, "provider_error");
+      }
+      if (response.status === 204) return null;
+      const reader = response.body?.getReader();
+      if (!reader) malformed();
+      const chunks: Uint8Array[] = []; let length = 0;
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        length += next.value.byteLength;
+        if (length > 2_000_000) { void reader.cancel().catch(() => undefined); malformed(); }
+        chunks.push(next.value);
+      }
+      const bytes = new Uint8Array(length); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
+      catch { return malformed(); }
+    } catch (error) {
+      if (error instanceof GoCardlessError) throw error;
+      throw new GoCardlessError(0, controller.signal.aborted ? "timeout" : "connection_error");
+    } finally { clearTimeout(timeout); }
+
   }
 
   async function token(): Promise<string> {

@@ -48,3 +48,21 @@ support tickets.
 
 Use synthetic fixtures for tests. Never capture a real consent callback or
 provider payload in a test fixture.
+
+## Reconnect and snapshot guarantees
+
+A complete connection snapshot stages account links, transactions, transfer candidates
+and booked balance checkpoints in one SQLite batch. A later-account validation or
+write failure rolls back the entire snapshot. A connection revision is checked at
+commit, so a concurrent disconnect or competing sync invalidates stale work.
+
+A normalized GoCardless account IBAN is hashed with the provider and institution
+before storage; the raw IBAN and provider account name are not persisted by this
+flow. The hash maps new requisitions/account IDs to the existing local account.
+Reconnection supersedes the old local connection and retains transaction identity,
+including pending-to-booked revisions. Missing stable identity blocks sync. Legacy
+links created without an identity must be verified before reconnecting; the app
+never guesses a mapping from names or balances. Provider identifiers, consent state,
+identity hashes and connection revision guards are excluded from portable backups.
+Only the consent-state digest and exact callback origin/path are stored; the raw
+callback state is not duplicated in stored redirect URLs.

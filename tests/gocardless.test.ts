@@ -104,3 +104,8 @@ describe("GoCardless Bank Account Data adapter", () => {
     await expect(client.getRequisition(id)).rejects.toMatchObject({ status: 429, code: "provider_error" });
   });
 });
+
+it("caps provider response bodies before parsing account data", async () => {
+  const { client } = fixture({ "/api/v2/token/new/": auth, "/api/v2/institutions/?country=it": new Response("x".repeat(2_000_001)) });
+  await expect(client.listItalianInstitutions()).rejects.toMatchObject({ code: "malformed_response" });
+});
