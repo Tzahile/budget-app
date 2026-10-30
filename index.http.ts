@@ -21,6 +21,7 @@ import {
   getAppData,
   getIngestionHistory,
   ingestTransactions,
+  listTransactions,
   reconcileAccount,
   seedDemoData,
   updateAccount,
@@ -32,10 +33,14 @@ import {
   deleteTransfer,
   decideIngestedTransferCandidate,
 } from "./server/repository.ts";
-import { parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { csvHeaders, parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { readXlsxWorkbook, parseXlsxSheet } from "./server/xlsx.ts";
+import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile } from "./server/csv-profiles.ts";
+import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { bankConnectionsResponse, beginBankConsent, completeBankConsent, disconnectBankConnection, syncBankConnection } from "./server/bank-service.ts";
-import { isTrustedMutationRequest, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
+import { exportBackup } from "./server/backup.ts";
+import { parseTransactionFilters } from "./server/transaction-search.ts";
 import {
   booleanField,
   centsField,
@@ -121,6 +126,15 @@ app.delete("/api/bank/connections/:id", async (c) => {
   return c.body(null, 204);
 });
 
+app.get("/api/transactions", async (c) => c.json(await listTransactions(parseTransactionFilters(new URL(c.req.url).searchParams))));
+
+app.get("/api/export", async (c) => {
+  const backup = await exportBackup();
+  c.header("Content-Type", "application/json; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="budgetapp-backup-${backup.exportedAt.slice(0, 10)}.json"`);
+  return c.body(JSON.stringify(backup));
+});
+
 app.post("/api/accounts", async (c) => {
   const body = await readBody(c.req.raw);
   await createAccount({
@@ -163,7 +177,7 @@ app.post("/api/transactions", async (c) => {
     date: dateField(body, "date"),
     amountCents: centsField(body),
     description: stringField(body, "description", 160),
-    kind: enumField(body, "kind", ["income", "expense"] as const),
+    kind: enumField(body, "kind", ["income", "expense", "refund"] as const),
   });
   return c.json({ ok: true }, 201);
 });
@@ -175,7 +189,7 @@ app.put("/api/transactions/:id", async (c) => {
     date: dateField(body, "date"),
     amountCents: centsField(body),
     description: stringField(body, "description", 160),
-    kind: enumField(body, "kind", ["income", "expense"] as const),
+    kind: enumField(body, "kind", ["income", "expense", "refund"] as const),
   });
   return c.json({ ok: true });
 });
@@ -200,8 +214,46 @@ app.delete("/api/transfers/:id", async (c) => {
   return c.body(null, 204);
 });
 
-app.post("/api/imports/csv", async (c) => {
+app.post("/api/imports/csv/preview", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
+  const csv = exactStringField(body, "csv", 500_000);
+  const headers = csvHeaders(csv);
+  if (!body.mapping) return c.json({ headers });
+  const parsed = parseCsvTransactions(csv, csvMapping(body.mapping));
+  return c.json({ headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
+});
+
+app.post("/api/imports/xlsx/preview", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
+  const workbook = await xlsxWorkbook(body);
+  const sheet = body.sheet == null ? workbook.sheets[0]?.name : stringField(body, "sheet", 31);
+  const headers = workbook.sheets.find((entry) => entry.name === sheet)?.headers;
+  if (!headers) throw new ValidationError("XLSX sheet was not found");
+  if (!body.mapping) return c.json({ sheets: workbook.sheets.map(({ name }) => name), sheet, headers });
+  let parsed;
+  try { parsed = parseXlsxSheet(workbook, sheet, csvMapping(body.mapping)); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX mapping is invalid"); }
+  return c.json({ sheets: workbook.sheets.map(({ name }) => name), sheet, headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), rowErrors: parsed.rowErrors });
+});
+
+app.get("/api/imports/csv/profiles", async (c) => c.json({ profiles: await listCsvMappingProfiles() }));
+app.post("/api/imports/csv/profiles", async (c) => {
   const body = await readBody(c.req.raw);
+  const id = await saveCsvMappingProfile(stringField(body, "name", 80), csvMapping(body.mapping));
+  return c.json({ id }, 201);
+});
+app.put("/api/imports/csv/profiles/:id", async (c) => {
+  const body = await readBody(c.req.raw);
+  await saveCsvMappingProfile(stringField(body, "name", 80), csvMapping(body.mapping), safeId(c.req.param("id")));
+  return c.json({ ok: true });
+});
+app.delete("/api/imports/csv/profiles/:id", async (c) => {
+  await deleteCsvMappingProfile(safeId(c.req.param("id")));
+  return c.body(null, 204);
+});
+
+app.post("/api/imports/csv", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
   const accountId = safeId(stringField(body, "accountId", 64));
   const csv = exactStringField(body, "csv", 500_000);
   const mapping = csvMapping(body.mapping);
@@ -228,6 +280,31 @@ app.post("/api/imports/csv", async (c) => {
   const result = await ingestTransactions({
     accountId, filename, source: "csv", transactions: parsed.transactions, retryKey,
   });
+  return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+});
+
+app.post("/api/imports/xlsx", async (c) => {
+  const body = await readJsonObject(c.req.raw, MAX_CSV_JSON_BODY_BYTES);
+  const accountId = safeId(stringField(body, "accountId", 64));
+  const workbook = await xlsxWorkbook(body);
+  const sheet = stringField(body, "sheet", 31);
+  const mapping = csvMapping(body.mapping);
+  let parsed;
+  try { parsed = parseXlsxSheet(workbook, sheet, mapping); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX mapping is invalid"); }
+  const filename = stringField(body, "filename", 160);
+  const retryKey = optionalString(body, "retryKey", 200);
+  if (parsed.errors.length) {
+    try {
+      await ingestTransactions({ accountId, filename, source: "xlsx", transactions: parsed.transactions, rowErrors: parsed.rowErrors, retryKey });
+    } catch (error) {
+      if (Number((error as Error & { status?: number }).status) === 422) {
+        return c.json({ ok: false, importId: String((error as Error & { importId?: string }).importId ?? ""), errors: parsed.errors }, 422);
+      }
+      throw error;
+    }
+  }
+  const result = await ingestTransactions({ accountId, filename, source: "xlsx", transactions: parsed.transactions, retryKey });
   return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
 });
 
@@ -361,13 +438,25 @@ function safeId(value: string): string {
 
 function csvMapping(value: unknown): CsvColumnMapping {
   const mapping = objectBody(value);
+  const amount = optionalString(mapping, "amount", 100) ?? undefined;
+  const debit = optionalString(mapping, "debit", 100) ?? undefined;
+  const credit = optionalString(mapping, "credit", 100) ?? undefined;
+  if (!(amount || (debit && credit)) || (amount && (debit || credit))) throw new ValidationError("Map an amount column or both debit and credit columns");
   return {
     date: stringField(mapping, "date", 100),
-    amount: stringField(mapping, "amount", 100),
+    amount, debit, credit,
     description: stringField(mapping, "description", 100),
     externalId: optionalString(mapping, "externalId", 100) ?? undefined,
     status: optionalString(mapping, "status", 100) ?? undefined,
+    dateFormat: mapping.dateFormat == null ? undefined : enumField(mapping, "dateFormat", ["iso", "day_first", "month_first"] as const),
+    decimalSeparator: mapping.decimalSeparator == null ? undefined : enumField(mapping, "decimalSeparator", [",", "."] as const),
   };
+}
+
+async function xlsxWorkbook(body: Record<string, unknown>) {
+  const base64 = exactStringField(body, "xlsx", 670_000);
+  try { return await readXlsxWorkbook(base64); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX file is invalid"); }
 }
 
 function plannedInput(body: Record<string, unknown>) {

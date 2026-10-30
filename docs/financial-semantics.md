@@ -32,7 +32,11 @@ income, spending, planned cash flow, and projections.
 - Income is stored as a positive amount.
 - Expenses are stored as a negative amount.
 - Refunds are positive cash movements and reduce “spent this month”, never
-  below zero.
+  below zero. They are not income. Manual refunds can be created, edited, and
+  deleted as corrections; their posting date determines which household month
+  receives the spending offset. Imported positive credits are income by default,
+  but a bank adapter can explicitly classify a known refund as `refund` through
+  the canonical ingestion boundary without manual entry.
 - Pending transactions do not count as spent. They also do not change a current
   balance until cleared.
 - Transfers between owned active accounts use two linked, cleared manual

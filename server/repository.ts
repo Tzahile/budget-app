@@ -43,6 +43,7 @@ import {
   insertTransferCandidateStatements,
   type TransferDetectionTransaction,
 } from "./ingested-transfers.ts";
+import { nextTransactionCursor, transactionPageQuery, type TransactionFilters, type TransactionPage } from "./transaction-search.ts";
 
 type Row = Record<string, unknown>;
 
@@ -209,6 +210,19 @@ export async function linkBankAccount(input: {
   });
 }
 
+export async function listTransactions(filters: TransactionFilters): Promise<TransactionPage> {
+  await ensureSchema();
+  const result = await db.execute(transactionPageQuery(filters));
+  const rows = result.rows as Row[];
+  return {
+    items: rows.slice(0, filters.limit).map((row) => ({
+      ...mapTransaction(row), activitySource: row.activity_source as TransactionPage["items"][number]["activitySource"],
+      counterpartAccountId: row.counterpart_account_id == null ? null : String(row.counterpart_account_id),
+    })),
+    nextCursor: nextTransactionCursor(rows.map((row) => ({ date: String(row.date), createdAt: String(row.created_at), id: String(row.id) })), filters.limit),
+  };
+}
+
 export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   await ensureSchema();
   const monthStart = `${asOfDate.slice(0, 7)}-01`;
@@ -304,7 +318,7 @@ export async function createTransaction(input: {
   date: string;
   amountCents: number;
   description: string;
-  kind: "income" | "expense";
+  kind: "income" | "expense" | "refund";
   source?: "manual" | "planned";
   plannedTransactionId?: string | null;
 }): Promise<void> {
@@ -652,6 +666,8 @@ function replayIngestion(row: Row): {
 function normalizeRetryKey(value: string | null | undefined): string | null {
   if (value == null) return null;
   const normalized = value.trim();
+  // Reject ASCII control characters in retry keys.
+  // eslint-disable-next-line no-control-regex
   if (!normalized || normalized.length > 200 || /[\u0000-\u001f\u007f]/.test(normalized)) {
     throw Object.assign(new Error("Retry key is invalid"), { status: 400 });
   }
@@ -691,7 +707,7 @@ export async function updateTransaction(id: string, input: {
   date: string;
   amountCents: number;
   description: string;
-  kind: "income" | "expense";
+  kind: "income" | "expense" | "refund";
 }): Promise<void> {
   await ensureSchema();
   const existing = await one("SELECT * FROM transactions WHERE id = ?", [id]);

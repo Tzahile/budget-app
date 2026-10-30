@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import ExcelJS from "exceljs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { useTestSqlite } from "./support/val-sqlite.ts";
 
@@ -21,6 +22,90 @@ function request(path: string, init: RequestInit = {}, user: string | null = "tz
 }
 
 describe("Hono financial API security integration", () => {
+  it("previews XLSX sheets, imports via saved CSV mapping, and deduplicates across formats", async () => {
+    const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+    const workbook = new ExcelJS.Workbook();
+    workbook.addWorksheet("Notes").addRow(["Synthetic only"]);
+    const sheet = workbook.addWorksheet("Movements");
+    sheet.addRow(["Date", "Amount", "Description", "ID"]);
+    sheet.addRow(["2026-09-16", -4.25, "Synthetic XLSX purchase", "xlsx-integration-1"]);
+    const xlsx = Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64");
+    const mapping = { date: "Date", amount: "Amount", description: "Description", externalId: "ID", decimalSeparator: "." };
+    const selection = await request("/api/imports/xlsx/preview", { method: "POST", headers, body: JSON.stringify({ xlsx }) });
+    expect(selection.status).toBe(200);
+    expect(await selection.json()).toMatchObject({ sheets: ["Notes", "Movements"], sheet: "Notes" });
+    const preview = await request("/api/imports/xlsx/preview", { method: "POST", headers, body: JSON.stringify({ xlsx, sheet: "Movements", mapping }) });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ rowCount: 1, validCount: 1, sample: [{ amountCents: -425 }] });
+    expect((await request("/api/accounts", { method: "POST", headers, body: JSON.stringify({ name: "Synthetic XLSX account", type: "checking", balanceCents: 0 }) })).status).toBe(201);
+    const data = await (await request("/api/data")).json() as { accounts: Array<{ id: string; name: string }> };
+    const accountId = data.accounts.find(({ name }) => name === "Synthetic XLSX account")!.id;
+    const body = { accountId, filename: "synthetic.xlsx", xlsx, sheet: "Movements", mapping };
+    const imported = await request("/api/imports/xlsx", { method: "POST", headers, body: JSON.stringify(body) });
+    expect(imported.status).toBe(201);
+    expect(await imported.json()).toMatchObject({ importedCount: 1, rowCount: 1 });
+    const csv = "Date,Amount,Description,ID\n2026-09-16,-4.25,Synthetic XLSX purchase,xlsx-integration-1\n";
+    const duplicate = await request("/api/imports/csv", { method: "POST", headers, body: JSON.stringify({ accountId, filename: "synthetic.csv", csv, mapping }) });
+    expect(duplicate.status).toBe(201);
+    expect(await duplicate.json()).toMatchObject({ importedCount: 0, duplicateCount: 1 });
+    expect((await (await request("/api/imports")).json()).imports).toContainEqual(expect.objectContaining({ source: "xlsx", acceptedCount: 1 }));
+  });
+  it("accepts positive manual refunds and rejects invalid kinds or amounts on create and edit", async () => {
+    const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+    const accountResponse = await request("/api/accounts", { method: "POST", headers,
+      body: JSON.stringify({ name: "Synthetic API refund account", type: "checking", balanceCents: 10_000 }) });
+    expect(accountResponse.status).toBe(201);
+    const accounts = await (await request("/api/data?asOf=2026-12-31")).json() as { accounts: Array<{ id: string; name: string }> };
+    const accountId = accounts.accounts.find((item) => item.name === "Synthetic API refund account")!.id;
+    const body = { accountId, date: "2026-12-31", description: "Synthetic API refund", amountCents: 1_000, kind: "refund" };
+    expect((await request("/api/transactions", { method: "POST", headers, body: JSON.stringify(body) })).status).toBe(201);
+    const snapshot = await (await request("/api/data?asOf=2026-12-31")).json() as { transactions: Array<{ id: string; description: string }> };
+    const id = snapshot.transactions.find((item) => item.description === body.description)!.id;
+    expect((await request(`/api/transactions/${id}`, { method: "PUT", headers,
+      body: JSON.stringify({ ...body, amountCents: 2_000 }) })).status).toBe(200);
+    for (const invalid of [{ ...body, kind: "transfer" }, { ...body, kind: "bogus" }, { ...body, amountCents: -1_000 }, { ...body, amountCents: 0 }]) {
+      expect((await request("/api/transactions", { method: "POST", headers, body: JSON.stringify(invalid) })).status).toBe(400);
+      expect((await request(`/api/transactions/${id}`, { method: "PUT", headers, body: JSON.stringify(invalid) })).status).toBe(400);
+    }
+    expect((await request(`/api/transactions/${id}`, { method: "DELETE", headers })).status).toBe(204);
+  });
+
+  it("accepts CSV requests over the ordinary JSON limit with an automatic date format", async () => {
+    const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+    const csv = "Date,Amount,Description,ID\n" + Array.from({ length: 210 }, (_, index) => `2026-09-16,-1.00,Synthetic purchase ${"x".repeat(140)},row-${index}\n`).join("");
+    expect(csv.length).toBeGreaterThan(32_000);
+    const mapping = { date: "Date", amount: "Amount", description: "Description", externalId: "ID" };
+    const preview = await request("/api/imports/csv/preview", { method: "POST", headers, body: JSON.stringify({ csv, mapping }) });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ rowCount: 210, validCount: 210, rowErrors: [] });
+    const created = await request("/api/accounts", { method: "POST", headers, body: JSON.stringify({ name: "Synthetic bulk CSV account", type: "checking", balanceCents: 0 }) });
+    expect(created.status).toBe(201);
+    const data = await (await request("/api/data")).json() as { accounts: Array<{ id: string; name: string }> };
+    const accountId = data.accounts.find((account) => account.name === "Synthetic bulk CSV account")!.id;
+    const imported = await request("/api/imports/csv", { method: "POST", headers, body: JSON.stringify({ accountId, filename: "synthetic.csv", csv, mapping }) });
+    expect(imported.status).toBe(201);
+    expect(await imported.json()).toMatchObject({ importedCount: 210, rowCount: 210 });
+    const oversizedOrdinaryRequest = await request("/api/accounts", { method: "POST", headers, body: JSON.stringify({ name: "x".repeat(33_000), type: "checking", balanceCents: 0 }) });
+    expect(oversizedOrdinaryRequest.status).toBe(413);
+  });
+  it("previews mapped rows and supports editable, deletable CSV profiles", async () => {
+    const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+    const csv = "Date;Debit;Credit;Details\n16/09/2026;12,50;;Synthetic coffee\n17/09/2026;;2,00;Synthetic refund\ninvalid;1,00;;Invalid date\n";
+    const mapping = { date: "Date", debit: "Debit", credit: "Credit", description: "Details", decimalSeparator: "," };
+    const preview = await request("/api/imports/csv/preview", { method: "POST", headers, body: JSON.stringify({ csv, mapping }) });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({ rowCount: 3, validCount: 2, sample: [
+      { occurredOn: "2026-09-16", amountCents: -1250 }, { occurredOn: "2026-09-17", amountCents: 200 },
+    ], rowErrors: [{ sourcePosition: 4, code: "invalid_date" }] });
+    const created = await request("/api/imports/csv/profiles", { method: "POST", headers, body: JSON.stringify({ name: "Synthetic bank", mapping }) });
+    expect(created.status).toBe(201);
+    const { id } = await created.json() as { id: string };
+    expect((await (await request("/api/imports/csv/profiles")).json()).profiles).toContainEqual(expect.objectContaining({ id, name: "Synthetic bank", mapping }));
+    expect((await request(`/api/imports/csv/profiles/${id}`, { method: "PUT", headers, body: JSON.stringify({ name: "Synthetic bank revised", mapping }) })).status).toBe(200);
+    expect((await request(`/api/imports/csv/profiles/${id}`, { method: "DELETE", headers })).status).toBe(204);
+    expect((await (await request("/api/imports/csv/profiles")).json()).profiles).toEqual([]);
+    expect((await request("/api/imports/csv/preview", {}, null)).status).toBe(401);
+  });
   it("enforces authentication, allowlisting, mutation origin, and JSON boundaries before repository access", async () => {
     expect((await request("/api/data", {}, null)).status).toBe(401);
     expect((await request("/api/data", {}, "not-allowed")).status).toBe(403);
