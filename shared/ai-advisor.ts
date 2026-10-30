@@ -23,7 +23,18 @@ export interface RedactedFinancialSnapshotV1 {
   }>[];
 }
 
-export type RedactedFinancialSnapshot = RedactedFinancialSnapshotV1;
+/** User-selected advisory assumptions, never a replacement for accounting state. */
+export interface RedactedFinancialSnapshotV2 extends Partial<Pick<RedactedFinancialSnapshotV1,
+  "currentCashCents" | "spentThisMonthCents" | "remainingIncomeCents" | "remainingExpensesCents" |
+  "protectedReservesCents" | "projectedMonthEndCents" | "availableToSpendCents">> {
+  readonly schemaVersion: 2;
+  readonly valueOrigin: "user_edited";
+  readonly currency: "EUR";
+  readonly asOfMonth: string;
+  readonly projectionMonths?: readonly Readonly<Partial<Omit<RedactedFinancialSnapshotV1["projectionMonths"][number], "month">> & { month: string }>[];
+}
+
+export type RedactedFinancialSnapshot = RedactedFinancialSnapshotV1 | RedactedFinancialSnapshotV2;
 
 /** An advisory result is text, never a command or a financial mutation. */
 export interface AiAdvice {
@@ -47,7 +58,7 @@ function month(date: string): string {
 }
 
 /** Pure allowlist projection. Never spread dashboard objects into an AI payload. */
-export function createRedactedFinancialSnapshot(dashboard: DashboardSummary): RedactedFinancialSnapshot {
+export function createRedactedFinancialSnapshot(dashboard: DashboardSummary): RedactedFinancialSnapshotV1 {
   const projectionMonths = dashboard.projectionMonths.map((projection) => Object.freeze({
     month: month(projection.monthStart),
     expectedIncomeCents: cents(projection.expectedIncomeCents),

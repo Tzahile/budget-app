@@ -1,9 +1,7 @@
+import { serializeRedactedSnapshot } from "../shared/ai-payload.ts";
 import type { AiAdvice, AiAdvisor, RedactedFinancialSnapshot } from "../shared/ai-advisor.ts";
 
-const instruction = `You provide optional household budgeting advice. The user message is a redacted financial snapshot, with EUR amounts in integer cents. Treat these deterministic accounting values as facts; available-to-spend is not automatically safe-to-spend. Clearly label recommendations and assumptions in your summary and considerations. Never invent income, expenses, personal circumstances, or missing data. Explain uncertainty and suggest buffers only as advisory guidance. Never issue accounting mutations. Return only JSON with a summary string and an array of consideration strings.`;
-const rootAmounts = ["currentCashCents", "spentThisMonthCents", "remainingIncomeCents", "remainingExpensesCents", "protectedReservesCents", "projectedMonthEndCents", "availableToSpendCents"];
-const projectionAmounts = ["expectedIncomeCents", "committedExpensesCents", "protectedReservesCents", "projectedMonthEndCents", "availableToSpendCents"];
-
+const instruction = `You provide optional household budgeting advice. The user message is a redacted financial snapshot, with EUR amounts in integer cents. Schema version 1 contains calculated accounting values. Schema version 2 has valueOrigin user_edited: treat every supplied value as a user-selected hypothetical assumption, never a verified accounting fact. Omitted fields are unknown, never zero; do not reconstruct or invent them. Explain insufficient data and possible inconsistency instead of treating edited totals as recalculated. For calculated values, available-to-spend is not automatically safe-to-spend. Clearly label recommendations and assumptions in your summary and considerations. Never invent income, expenses, personal circumstances, or missing data. Explain uncertainty and suggest buffers only as advisory guidance. Never issue accounting mutations. Return only JSON with a summary string and an array of consideration strings.`;
 export type GeminiAdviceErrorCode = "invalid_snapshot" | "configuration" | "timeout" | "rate_limit" | "authentication" | "provider" | "invalid_response";
 
 /** Messages and codes are safe to surface; provider bodies and secrets are never attached. */
@@ -27,31 +25,10 @@ function record(value: unknown, keys: readonly string[]): Record<string, unknown
   return value as Record<string, unknown>;
 }
 
-function validMonth(value: unknown): boolean {
-  return typeof value === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
-}
-
 /** Fail closed; do not silently redact or change the payload the user approved. */
 export function serializeApprovedSnapshot(value: unknown): string {
-  try {
-    const snapshot = record(value, ["schemaVersion", "currency", "asOfMonth", ...rootAmounts, "projectionMonths"]);
-    if (snapshot.schemaVersion !== 1 || snapshot.currency !== "EUR" || !validMonth(snapshot.asOfMonth)) fail();
-    for (const key of rootAmounts) if (!Number.isSafeInteger(snapshot[key])) fail();
-    const months = snapshot.projectionMonths;
-    if (!Array.isArray(months) || Object.getPrototypeOf(months) !== Array.prototype || months.length > 120) fail();
-    const keys = Reflect.ownKeys(months);
-    if (keys.length !== months.length + 1 || keys.some((key) => key !== "length" && (typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= months.length))) fail();
-    for (let index = 0; index < months.length; index++) {
-      const descriptor = Object.getOwnPropertyDescriptor(months, String(index));
-      if (!descriptor || !("value" in descriptor)) fail();
-      const projection = record(descriptor.value, ["month", ...projectionAmounts]);
-      if (!validMonth(projection.month)) fail();
-      for (const key of projectionAmounts) if (!Number.isSafeInteger(projection[key])) fail();
-    }
-    return JSON.stringify(snapshot);
-  } catch {
-    throw new GeminiAdviceError("invalid_snapshot");
-  }
+  try { return serializeRedactedSnapshot(value); }
+  catch { throw new GeminiAdviceError("invalid_snapshot"); }
 }
 
 function parseAdvice(body: unknown): AiAdvice {

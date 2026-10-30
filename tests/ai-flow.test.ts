@@ -32,6 +32,26 @@ function harness(advisor?: AiAdvisor) {
 }
 
 describe("explicit AI preview and confirmation", () => {
+  it("sends sparse edited assumptions exactly, without refreshing calculated state or filling omitted metrics", async () => {
+    const advise = vi.fn<AiAdvisor["advise"]>(async () => ({ summary: "Synthetic edited advice", considerations: [] }));
+    const { request, getDashboard } = harness({ advise });
+    const edited = { schemaVersion: 2, valueOrigin: "user_edited", currency: "EUR", asOfMonth: "2026-10", currentCashCents: -1234, projectionMonths: [{ month: "2026-11", committedExpensesCents: 321 }] };
+    const payload = JSON.stringify(edited);
+    expect((await request("advice", { confirmed: false, payload })).status).toBe(400);
+    expect(advise).not.toHaveBeenCalled();
+    expect((await request("advice", { confirmed: true, payload })).status).toBe(200);
+    expect(advise).toHaveBeenCalledExactlyOnceWith(edited);
+    expect(JSON.stringify(advise.mock.calls[0][0])).toBe(payload);
+    expect(getDashboard).not.toHaveBeenCalled();
+    for (const invalid of [{ ...edited, note: "RAW_SENTINEL" }, { ...edited, currentCashCents: "1234" }, { ...edited, valueOrigin: undefined }, { ...edited, projectionMonths: [{ month: "2026-11", accountId: "RAW_SENTINEL" }] }]) {
+      const response = await request("advice", { confirmed: true, payload: JSON.stringify(invalid) });
+      expect(response.status).toBe(400);
+      expect(await response.text()).not.toContain("RAW_SENTINEL");
+    }
+    expect(advise).toHaveBeenCalledTimes(1);
+    expect((await harness().request("advice", { confirmed: true, payload })).status).toBe(503);
+  });
+
   it("makes no call at creation or preview, then sends the fixed approved snapshot once", async () => {
     const advise = vi.fn<AiAdvisor["advise"]>(async () => ({ summary: "Synthetic recommendation", considerations: [] }));
     const { request, getDashboard } = harness({ advise });
