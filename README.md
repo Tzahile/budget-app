@@ -23,7 +23,7 @@ available to spend.
 - canonical transaction ingestion with validated CSV and XLSX adapters, atomic row-level history, and retry-safe import runs
 - CSV/XLSX import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
 - explicit review of detected owned-account transfers from imported transactions
-- read-only Open Banking adapter, consent state, manual sync and reconciliation
+- gated provider-neutral Open Banking adapters (Enable Banking and GoCardless), consent state, manual sync and reconciliation
   foundation; live BBVA Italy connection remains gated on provider verification
 - authenticated versioned JSON backup download of canonical and audit data
 - documented provider-neutral Open Banking architecture, consent boundary, and

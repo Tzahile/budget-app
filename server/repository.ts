@@ -179,6 +179,10 @@ async function prepareLinkedBankAccount(input: {
     if (legacy && input.identityHash) throw conflict("Existing bank account identity needs verification before reconnecting");
   }
   const accountId = String(existing?.account_id ?? identity?.account_id ?? crypto.randomUUID());
+  if (existing || identity) {
+    const account = await one("SELECT is_active, currency FROM accounts WHERE id = ?", [accountId]);
+    if (!account || account.is_active !== 1 || account.currency !== "EUR") throw conflict("Linked bank account is inactive or unsupported");
+  }
   const now = new Date().toISOString();
   const statements: MigrationStatement[] = [];
   if (!existing && !identity) statements.push({
@@ -244,14 +248,14 @@ export async function applyBankConnectionSnapshot(input: {
   return { importedCount, duplicateCount, accounts: input.accounts.length };
 }
 
-export async function markBankConnection(id: string, status: BankConnectionStatus, safeErrorCode?: string | null): Promise<void> {
+export async function markBankConnection(id: string, status: BankConnectionStatus, safeErrorCode?: string | null, expectedRevision?: number): Promise<void> {
   await ensureSchema();
   if (safeErrorCode && !/^[a-z_]{1,50}$/.test(safeErrorCode)) throw new Error("Invalid safe error code");
   const result = await db.execute({
-    sql: "UPDATE bank_connections SET status = ?, safe_error_code = ?, sync_revision = sync_revision + 1, updated_at = ? WHERE id = ?",
-    args: [status, safeErrorCode ?? null, new Date().toISOString(), id],
+    sql: "UPDATE bank_connections SET status = ?, safe_error_code = ?, sync_revision = sync_revision + 1, updated_at = ? WHERE id = ? AND (? IS NULL OR (sync_revision = ? AND status = 'connected'))",
+    args: [status, safeErrorCode ?? null, new Date().toISOString(), id, expectedRevision ?? null, expectedRevision ?? null],
   });
-  requireChanged(result.rowsAffected, "Bank connection");
+  if (expectedRevision === undefined) requireChanged(result.rowsAffected, "Bank connection");
 }
 
 export async function linkBankAccount(input: {

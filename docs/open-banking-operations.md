@@ -1,31 +1,73 @@
 # Open Banking operations
 
-The GoCardless Bank Account Data adapter is a candidate for read-only EU account
-information. Before enabling a live connection, verify the provider's current
-Italy institution catalog contains **BBVA Italy** (the Italian branch, not BBVA
-Spain), check the account-information service terms and price, and complete a
-user-consented test of accounts, balances, booked transactions, and reconnection.
-Country-level coverage alone is insufficient. Keep the UI unavailable until the
-catalog confirms the institution and the required configuration exists.
+## Provider decision and external acceptance gate (2026-10-31)
 
-## Configuration
+The preferred candidate for new personal use is Enable Banking. Its public
+[Italy market page](https://enablebanking.com/docs/markets/it/) lists BBVA IT and its
+[terms](https://enablebanking.com/terms/) describe personal use of the account holder's
+own linked accounts. These public statements are not proof that this user's production
+application can connect to BBVA Italy. Follow the provider's
+[linked-account onboarding](https://enablebanking.com/docs/api/linked-accounts/).
+No paid plan, contract, bank account link or provider activation is created by this code.
+GoCardless remains an explicit alternate for existing eligible application accounts;
+its current onboarding/eligibility must be checked rather than assuming old free signup
+instructions still apply.
 
-Set provider secrets in the deployment secret store, never in source control or
-client configuration. `BUDGET_APP_GOCARDLESS_SECRET_ID` and
-`BUDGET_APP_GOCARDLESS_SECRET_KEY` are application credentials. The bank login
-and SCA flow takes place only on the provider/bank pages. The Val Town owner
-and explicitly allowed users remain the only BudgetApp users.
+Both candidate adapters use the same consent, canonical ingestion, reconciliation
+and deterministic accounting boundary. Provider selection is explicit; failures never
+fall back to another provider, model or paid service. API behavior follows the
+[official Enable Banking API reference](https://enablebanking.com/docs/api/reference/).
 
-Set `BUDGET_APP_BBVA_ITALY_INSTITUTION_ID` only after the live catalog and
-consented functional test confirm the exact Italian institution. Runtime
-catalog membership is checked again before issuing a consent link. An unset
-ID leaves the connection control unavailable.
+## Deployment configuration and first consent test
 
-Use an exact deployed HTTPS origin for the redirect. The callback must return
-to the same Val Town session that began consent. A one-time, short-lived state
-is bound to the username and requisition. Do not include credentials, tokens,
-account IDs, IBANs, or transaction details in URLs, logs, screenshots, or
-support tickets.
+Store secrets only in Val Town's server environment. Never paste them into an issue,
+PR, frontend configuration, screenshot, log or source file.
+
+For Enable Banking, register a **production** personal application, link only your own
+accounts through the provider control panel, and configure:
+
+- `BUDGET_APP_BANK_PROVIDER=enable-banking`
+- `BUDGET_APP_ENABLE_BANKING_APP_ID`: the provider's application UUID.
+- `BUDGET_APP_ENABLE_BANKING_PRIVATE_KEY`: the server-only PKCS#8 RSA PEM private key
+  corresponding to the application's registered public certificate. The client signs
+  short-lived RS256 JWTs; the key is never sent to the provider or browser.
+- `BUDGET_APP_ENABLE_BANKING_ASPSP_NAME=BBVA`: the exact Italian ASPSP name from the
+  authenticated catalog. The adapter also requires country IT, personal AIS access and
+  a credential-free redirect method. Banks requiring unsupported PSU headers are excluded.
+- Register the exact deployed HTTPS callback `<app-origin>/api/bank/callback` in the
+  provider dashboard. Authorization state is transmitted separately, not stored in this URL.
+
+`BUDGET_APP_BANK_SYNC_VERIFIED` defaults to unset/disabled. It is an **operator preflight
+flag**, not a claim that live acceptance is finished. Set it to literal `true` only after
+reviewing current terms/pricing and the application's authenticated BBVA Italy catalog;
+this permits the initial user-consented test. It must not be interpreted as evidence of
+a successful bank sync. The live acceptance checklist below is separate and remains
+incomplete until observed. Clearing the flag blocks new consent and existing sync;
+disconnection remains available. The current catalog is checked again before consent.
+
+For the GoCardless alternate, explicitly select
+`BUDGET_APP_BANK_PROVIDER=gocardless-bank-account-data`, configure
+`BUDGET_APP_GOCARDLESS_SECRET_ID`, `BUDGET_APP_GOCARDLESS_SECRET_KEY`, and the authenticated
+`BUDGET_APP_BBVA_ITALY_INSTITUTION_ID`, then perform the same operator preflight.
+Do not create direct bank credentials or PSD2 connections.
+
+## Live acceptance checklist — not yet completed
+
+All live steps use the private deployment and bank/provider pages; no real payload
+becomes a test fixture, screenshot or repository artifact.
+
+1. Confirm the production application is eligible for personal own-account access,
+   that current terms/pricing fit the project, and authenticated catalog coverage is BBVA IT.
+2. The user starts consent while signed in to BudgetApp, verifies the provider/bank
+   pages, completes SCA themselves and returns to the same authenticated callback session.
+3. Verify account list and booked EUR balance; explicitly sync complete booked transactions.
+   Confirm dashboard cash and imported history against the bank privately.
+4. Repeat sync: no duplicate transactions or balance changes. Test a later incremental sync.
+5. Reconnect through a new provider session: local account IDs and cash must remain the same;
+   no duplicate household account or repeated transactions. Verify expiry/re-auth behavior.
+6. Disconnect: provider session deletion succeeds, later sync is blocked and local history remains.
+7. Record only non-sensitive pass/fail evidence and dates in the issue. Keep PR #52 draft
+   until these checks and GitHub CI pass. No synthetic test substitutes for live acceptance.
 
 ## Recovery
 

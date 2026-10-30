@@ -1,3 +1,5 @@
+import { bankJson, bankRequest } from "./bank-http.ts";
+import { BankProviderError } from "./bank-provider.ts";
 import type { CanonicalTransactionInput } from "./ingestion.ts";
 
 const baseUrl = "https://bankaccountdata.gocardless.com/api/v2";
@@ -32,17 +34,14 @@ export interface GoCardlessBalance {
   referenceDate: string | null;
 }
 
-export class GoCardlessError extends Error {
-  constructor(readonly status: number, readonly code: string) {
-    super(`Bank data request failed (${status}, ${code})`);
-  }
-}
+export class GoCardlessError extends BankProviderError {}
 
 /** Bank credentials are read only from server environment; tokens stay in memory. */
 export function createGoCardlessClient(options: {
   fetch?: typeof fetch;
   env?: (name: string) => string | undefined;
   now?: () => number;
+  timeoutMs?: number;
 } = {}) {
   const request = options.fetch ?? fetch;
   const env = options.env ?? ((name: string) => Deno.env.get(name));
@@ -53,37 +52,17 @@ export function createGoCardlessClient(options: {
   let refreshUntil = 0;
 
   async function json(path: string, init: RequestInit = {}, authenticate = true): Promise<unknown> {
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (init.body) headers["Content-Type"] = "application/json";
-    if (authenticate) headers.Authorization = `Bearer ${await token()}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
     try {
-      const response = await request(`${baseUrl}${path}`, { ...init, headers, redirect: "error", signal: controller.signal });
-      if (!response.ok) {
-        void response.body?.cancel().catch(() => undefined);
-        throw new GoCardlessError(response.status, "provider_error");
-      }
-      if (response.status === 204) return null;
-      const reader = response.body?.getReader();
-      if (!reader) malformed();
-      const chunks: Uint8Array[] = []; let length = 0;
-      while (true) {
-        const next = await reader.read();
-        if (next.done) break;
-        length += next.value.byteLength;
-        if (length > 2_000_000) { void reader.cancel().catch(() => undefined); malformed(); }
-        chunks.push(next.value);
-      }
-      const bytes = new Uint8Array(length); let offset = 0;
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-      try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
-      catch { return malformed(); }
+      return await bankRequest(async (signal) => {
+        const headers: Record<string, string> = { Accept: "application/json" };
+        if (init.body) headers["Content-Type"] = "application/json";
+        if (authenticate) headers.Authorization = `Bearer ${await token()}`;
+        return bankJson(request, `${baseUrl}${path}`, { ...init, headers }, signal);
+      }, options.timeoutMs);
     } catch (error) {
-      if (error instanceof GoCardlessError) throw error;
-      throw new GoCardlessError(0, controller.signal.aborted ? "timeout" : "connection_error");
-    } finally { clearTimeout(timeout); }
-
+      if (error instanceof BankProviderError) throw new GoCardlessError(error.status, error.code);
+      throw error;
+    }
   }
 
   async function token(): Promise<string> {
@@ -195,7 +174,7 @@ export function createGoCardlessClient(options: {
     ];
   }
 
-  return { listItalianInstitutions, createRequisition, getRequisition, deleteRequisition, getAccount, getBalances, getTransactions };
+  return { providerId: "gocardless-bank-account-data" as const, listItalianInstitutions, createRequisition, getRequisition, deleteRequisition, getAccount, getBalances, getTransactions };
 }
 
 function normalizeTransaction(raw: unknown, status: "cleared" | "pending"): CanonicalTransactionInput {

@@ -7,7 +7,11 @@ import { disconnectBankConnection, syncBankConnection } from "../server/bank-ser
 import { createGoCardlessClient } from "../server/gocardless.ts";
 
 let database: DatabaseSync;
-beforeAll(() => { database = new DatabaseSync(":memory:"); useTestSqlite(database); });
+function useGoCardlessEnvironment() {
+  const values: Record<string, string> = { BUDGET_APP_BANK_PROVIDER: "gocardless-bank-account-data", BUDGET_APP_BANK_SYNC_VERIFIED: "true", BUDGET_APP_BBVA_ITALY_INSTITUTION_ID: "it-synthetic", BUDGET_APP_GOCARDLESS_SECRET_ID: "synthetic", BUDGET_APP_GOCARDLESS_SECRET_KEY: "synthetic" };
+  Object.assign(globalThis, { Deno: { env: { get: (name: string) => values[name] } } });
+}
+beforeAll(() => { database = new DatabaseSync(":memory:"); useTestSqlite(database); useGoCardlessEnvironment(); });
 afterAll(() => database.close());
 
 describe("manual bank sync", () => {
@@ -83,6 +87,9 @@ describe("atomic connection snapshots and reconnect", () => {
     expect(database.prepare("SELECT status FROM bank_connections WHERE id = ?").get(old)!.status).toBe("reauth_required");
     expect(database.prepare("SELECT bank_connection_id, status FROM transactions WHERE account_id = ?").get(local)).toMatchObject({ bank_connection_id: newer, status: "cleared" });
     expect(JSON.stringify(database.prepare("SELECT * FROM bank_account_identities").all())).not.toContain("IT60X0542811101000000333333");
+    database.prepare("UPDATE accounts SET is_active = 0 WHERE id = ?").run(local);
+    await expect(syncBankConnection(newer, adapter)).rejects.toMatchObject({ status: 409 });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(local)!.balance_cents).toBe(900);
   });
 });
 
@@ -104,4 +111,50 @@ it("checks the connection revision at SQL commit, rolling back a concurrent disc
   finally { spy.mockRestore(); }
   expect(database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n).toBe(count);
   expect(database.prepare("SELECT COUNT(*) AS n FROM imports WHERE bank_connection_id = ?").get(id)!.n).toBe(0);
+});
+
+it("uses gated Enable Banking consent/code exchange and the same canonical sync without raw identity persistence", async () => {
+  const { beginBankConsent, completeBankConsent, bankConnectionsResponse } = await import("../server/bank-service.ts");
+  const { getBankConnectionForSync } = await import("../server/repository.ts");
+  const environment: Record<string, string> = { BUDGET_APP_BANK_PROVIDER: "enable-banking", BUDGET_APP_BANK_SYNC_VERIFIED: "true", BUDGET_APP_ENABLE_BANKING_APP_ID: "synthetic-app", BUDGET_APP_ENABLE_BANKING_PRIVATE_KEY: "synthetic-not-a-key", BUDGET_APP_ENABLE_BANKING_ASPSP_NAME: "BBVA" };
+  Object.assign(globalThis, { Deno: { env: { get: (name: string) => environment[name] } } });
+  let state = ""; let codeCalls = 0;
+  const providerSession = { id: "enable-synthetic-session", status: "LN", accounts: ["enable-synthetic-account"], institutionId: "BBVA", reference: null, link: null, expiresAt: "2999-01-01T00:00:00.000Z", accountIdentities: { "enable-synthetic-account": "synthetic-enable-identity" } };
+  const adapter = {
+    providerId: "enable-banking", listItalianInstitutions: async () => [{ id: "BBVA", name: "BBVA", countries: ["IT"], transactionTotalDays: null }],
+    createRequisition: async (_institution: string, redirect: string, reference: string) => { expect(redirect).toBe("https://budget.example/api/bank/callback"); state = reference; return { ...providerSession, id: "enable-synthetic-authorization", accounts: [], link: "https://auth.enablebanking.com/ais/start?sessionid=synthetic" }; },
+    exchangeAuthorization: async (code: string) => { expect(code).toBe("synthetic-one-time-code"); codeCalls++; return providerSession; },
+    getRequisition: async () => providerSession,
+    getAccount: async (id: string) => ({ id, status: "READY", name: null, iban: null }),
+    getBalances: async () => [{ amountCents: 1000, type: "interimBooked", referenceDate: null }],
+    getTransactions: async () => [{ occurredOn: "2026-09-20", amountCents: 100, description: "Synthetic", externalId: "enable-entry" }],
+    deleteRequisition: async () => undefined,
+  };
+  const { authorizationUrl } = await beginBankConsent({ institutionId: "BBVA", ownerUsername: "owner", origin: "https://budget.example" }, adapter);
+  expect(authorizationUrl).toContain("https://auth.enablebanking.com/");
+  expect(JSON.stringify(database.prepare("SELECT state_hash, redirect_uri FROM bank_consent_attempts").all())).not.toContain(state);
+  await expect(completeBankConsent({ state, ownerUsername: "outsider", origin: "https://budget.example", code: "synthetic-one-time-code" }, adapter)).rejects.toMatchObject({ status: 400 });
+  await completeBankConsent({ state, ownerUsername: "owner", origin: "https://budget.example", code: "synthetic-one-time-code" }, adapter);
+  await expect(completeBankConsent({ state, ownerUsername: "owner", origin: "https://budget.example", code: "synthetic-one-time-code" }, adapter)).rejects.toMatchObject({ status: 400 });
+  expect(codeCalls).toBe(1);
+  const connection = (await listBankConnections()).find((c) => c.provider === "enable-banking")!;
+  expect((await getBankConnectionForSync(connection.id))?.consentExpiresAt).toBe(providerSession.expiresAt);
+  expect(await syncBankConnection(connection.id, adapter)).toEqual({ importedCount: 1, duplicateCount: 0, accounts: 1 });
+  expect(await syncBankConnection(connection.id, adapter)).toEqual({ importedCount: 0, duplicateCount: 1, accounts: 1 });
+  expect(JSON.stringify(await bankConnectionsResponse(adapter))).not.toContain("synthetic-enable-identity");
+  environment.BUDGET_APP_BANK_SYNC_VERIFIED = "false";
+  expect((await bankConnectionsResponse(adapter)).available).toBe(false);
+  await expect(syncBankConnection(connection.id, adapter)).rejects.toMatchObject({ status: 503 });
+  await disconnectBankConnection(connection.id, adapter);
+  useGoCardlessEnvironment();
+});
+
+it("refuses a stale closing booked balance instead of reconciling today's ledger backwards", async () => {
+  const id = await createBankConnection({ provider: "gocardless-bank-account-data", providerConnectionId: "stale-requisition", institutionId: "stale-institution", institutionName: "Synthetic", countryCode: "IT" });
+  const adapter = { getRequisition: async () => ({ status: "LN", accounts: ["stale-account"], institutionId: "stale-institution" }),
+    getAccount: async (id: string) => ({ id, status: "READY", name: null, iban: "IT60X0542811101000000555555" }),
+    getBalances: async () => [{ amountCents: 123, type: "closingBooked", referenceDate: "2020-01-01" }], getTransactions: async () => [],
+  } as unknown as ReturnType<typeof createGoCardlessClient>;
+  await expect(syncBankConnection(id, adapter)).rejects.toMatchObject({ status: 422 });
+  expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_links WHERE connection_id = ?").get(id)!.n).toBe(0);
 });

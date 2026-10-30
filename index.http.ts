@@ -110,7 +110,7 @@ app.post("/api/bank/connect", async (c) => {
 app.get("/api/bank/callback", async (c) => {
   const session = await getOAuthUserData(c.req.raw);
   await completeBankConsent({
-    state: c.req.query("state") ?? "",
+    state: c.req.query("state") ?? "", code: c.req.query("code"),
     ownerUsername: session!.user!.username!,
     origin: new URL(c.req.url).origin,
   });
