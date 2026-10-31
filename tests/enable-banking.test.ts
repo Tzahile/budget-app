@@ -60,11 +60,17 @@ describe("Enable Banking server adapter", () => {
 
   it("fetches every bounded page and uses stable entry_reference, never unstable transaction_id", async () => {
     const { client } = fixture({ [`/accounts/${accountId}/transactions?transaction_status=BOOK`]: { transactions: [transaction], continuation_key: "page2" },
-      [`/accounts/${accountId}/transactions?transaction_status=BOOK&continuation_key=page2`]: { transactions: [{ ...transaction, entry_reference: undefined, transaction_id: "unstable-2", credit_debit_indicator: "CRDT" }] } });
+      [`/accounts/${accountId}/transactions?transaction_status=BOOK&continuation_key=page2`]: { transactions: [{ ...transaction, entry_reference: "synthetic-stable-entry-2", transaction_id: "unstable-2", credit_debit_indicator: "CRDT" }] } });
     expect(await client.getTransactions(accountId)).toEqual([
       { occurredOn: "2026-10-30", amountCents: -1234, description: "Synthetic purchase", externalId: "synthetic-stable-entry", status: "cleared", auditMetadata: { adapter: "enable_banking" } },
-      { occurredOn: "2026-10-30", amountCents: 1234, description: "Synthetic purchase", externalId: null, status: "cleared", auditMetadata: { adapter: "enable_banking" } },
+      { occurredOn: "2026-10-30", amountCents: 1234, description: "Synthetic purchase", externalId: "synthetic-stable-entry-2", status: "cleared", auditMetadata: { adapter: "enable_banking" } },
     ]);
+  });
+
+  it("rejects missing stable entry references instead of duplicating changed descriptions", async () => {
+    const missing = { ...transaction, entry_reference: undefined, transaction_id: "unstable-session-id" };
+    const { client } = fixture({ [`/accounts/${accountId}/transactions?transaction_status=BOOK`]: { transactions: [transaction, missing] } });
+    await expect(client.getTransactions(accountId)).rejects.toMatchObject({ code: "malformed_response" });
   });
 
   it("rejects foreign/partial/looping pages without returning a partial result", async () => {

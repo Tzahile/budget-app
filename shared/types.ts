@@ -43,7 +43,8 @@ export interface BankConnection {
   expiresAt: string | null;
   lastSyncedAt: string | null;
   lastError: string | null;
-  accounts: { id: string; accountId: string | null; name: string; currency: string }[];
+  accounts: { id: string; accountId: string | null; name: string; currency: string;
+    historyFrom: string | null; historyThrough: string | null; historyGap: boolean }[];
 }
 
 export interface BankConnectionsResponse {

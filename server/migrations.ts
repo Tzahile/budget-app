@@ -309,6 +309,20 @@ export const migrations: readonly Migration[] = [
       "ALTER TABLE transactions ADD COLUMN bank_connection_id TEXT REFERENCES bank_connections(id) ON DELETE SET NULL",
     ],
   },
+  {
+    version: 14,
+    name: "bank transaction coverage and history gaps",
+    statements: [
+      `CREATE TABLE bank_account_sync_coverage (
+        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE RESTRICT,
+        first_date TEXT NOT NULL,
+        last_date TEXT NOT NULL,
+        has_gap INTEGER NOT NULL DEFAULT 0 CHECK (has_gap IN (0, 1)),
+        updated_at TEXT NOT NULL,
+        CHECK (first_date <= last_date)
+      )`,
+    ],
+  },
 ];
 
 export async function migrateDatabase(

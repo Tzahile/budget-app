@@ -173,6 +173,14 @@ async function prepareLinkedBankAccount(input: {
   // Previously linked accounts without a stable identity cannot safely be guessed
   // during reconnect. Fail closed rather than adding the same cash twice.
   if (!existing && !identity) {
+    // Never create a second household balance over a manually maintained bank
+    // account. Require an explicit owner decision: use that account or create
+    // a separate one. Cash accounts are unrelated to bank balances.
+    const unmapped = await one(`SELECT 1 FROM accounts a WHERE a.is_active = 1 AND a.is_demo = 0
+      AND a.type IN ('checking', 'savings')
+      AND NOT EXISTS (SELECT 1 FROM bank_account_identities i WHERE i.account_id = a.id)
+      LIMIT 1`);
+    if (unmapped) throw conflict("Bank account mapping is required before first sync");
     const legacy = await one(`SELECT 1 FROM bank_account_links l JOIN bank_connections c ON c.id = l.connection_id
       WHERE c.provider = ? AND c.institution_id = ? AND NOT EXISTS
         (SELECT 1 FROM bank_account_identities i WHERE i.account_id = l.account_id AND i.provider = c.provider AND i.institution_id = c.institution_id) LIMIT 1`, [connection.provider, connection.institutionId]);
@@ -214,9 +222,73 @@ export async function createLinkedBankAccount(input: {
   return plan.accountId;
 }
 
+/** Owner-confirmed mapping. A null accountId explicitly creates a separate account. */
+export async function confirmBankAccountMapping(input: {
+  connectionId: string; providerAccountId: string; identityHash: string; accountId: string | null;
+}): Promise<string> {
+  await ensureSchema();
+  if (!input.providerAccountId || input.providerAccountId.length > 200 ||
+      !/^[a-f0-9]{64}$/.test(input.identityHash)) throw conflict("Invalid bank mapping identity");
+  const connection = await getBankConnectionForSync(input.connectionId);
+  if (!connection || connection.status !== "connected" ||
+    (connection.consentExpiresAt && connection.consentExpiresAt <= new Date().toISOString())) throw conflict("Bank connection requires reconnection");
+  const alreadyLinked = await one("SELECT account_id FROM bank_account_links WHERE connection_id = ? AND provider_account_id = ?", [input.connectionId, input.providerAccountId]);
+  const identity = await one("SELECT account_id FROM bank_account_identities WHERE provider = ? AND institution_id = ? AND identity_hash = ?", [connection.provider, connection.institutionId, input.identityHash]);
+  if (alreadyLinked || identity) {
+    const owner = String(alreadyLinked?.account_id ?? identity?.account_id);
+    if (input.accountId !== owner || (alreadyLinked && identity && alreadyLinked.account_id !== identity.account_id)) {
+      throw conflict("Bank account was already mapped; reload before changing it");
+    }
+    return owner;
+  }
+  const accountId = input.accountId ?? crypto.randomUUID();
+  if (input.accountId) {
+    const account = await one("SELECT is_active, currency, type FROM accounts WHERE id = ?", [accountId]);
+    if (!account || account.is_active !== 1 || account.currency !== "EUR" || account.type === "cash") throw conflict("Only an active EUR bank account can be mapped");
+    const occupied = await one(`SELECT 1 FROM bank_account_identities WHERE account_id = ? LIMIT 1`, [accountId]);
+    if (occupied) throw conflict("Bank account is already mapped to another identity");
+  }
+  const now = new Date().toISOString();
+  const statements: MigrationStatement[] = [
+    { sql: "UPDATE bank_connections SET sync_revision = sync_revision + 1, updated_at = ? WHERE id = ? AND status = 'connected' AND sync_revision = ? AND (consent_expires_at IS NULL OR consent_expires_at > ?)",
+      args: [now, input.connectionId, connection.syncRevision, now] },
+    "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END",
+    "DELETE FROM bank_sync_guards",
+  ];
+  if (!input.accountId) statements.push({
+    sql: "INSERT INTO accounts (id, name, type, currency, balance_cents, is_active, created_at, updated_at) VALUES (?, 'Bank account', 'checking', 'EUR', 0, 1, ?, ?)",
+    args: [accountId, now, now],
+  });
+  statements.push(
+    { sql: "INSERT INTO bank_account_identities (provider, institution_id, identity_hash, account_id) VALUES (?, ?, ?, ?)",
+      args: [connection.provider, connection.institutionId, input.identityHash, accountId] },
+    { sql: "INSERT INTO bank_account_links (connection_id, provider_account_id, account_id, created_at) VALUES (?, ?, ?, ?)",
+      args: [input.connectionId, input.providerAccountId, accountId, now] },
+  );
+  try { await db.batch(statements); }
+  catch (error) {
+    if (error instanceof Error && /constraint|check|unique/i.test(error.message)) throw conflict("Bank mapping changed; reload and retry");
+    throw error;
+  }
+  return accountId;
+}
+
+export async function listMappedBankAccounts(connectionId: string): Promise<Array<{ providerAccountId: string; accountId: string }>> {
+  await ensureSchema();
+  const rows = await db.execute({ sql: "SELECT provider_account_id, account_id FROM bank_account_links WHERE connection_id = ?", args: [connectionId] });
+  return rows.rows.map((row) => ({ providerAccountId: String(row.provider_account_id), accountId: String(row.account_id) }));
+}
+
+export async function listBankSyncCoverage(): Promise<Array<{ accountId: string; from: string; through: string; hasGap: boolean }>> {
+  await ensureSchema();
+  const result = await db.execute("SELECT account_id, first_date, last_date, has_gap FROM bank_account_sync_coverage");
+  return result.rows.map((row) => ({ accountId: String(row.account_id), from: String(row.first_date),
+    through: String(row.last_date), hasGap: row.has_gap === 1 }));
+}
+
 export async function applyBankConnectionSnapshot(input: {
   connectionId: string; provider: string; expectedRevision: number;
-  accounts: readonly { providerAccountId: string; identityHash: string; name: string; balanceCents: number; transactions: readonly CanonicalTransactionInput[] }[];
+  accounts: readonly { providerAccountId: string; identityHash: string; name: string; balanceCents: number; transactions: readonly CanonicalTransactionInput[]; coverageFrom: string; coverageThrough: string }[];
 }): Promise<{ importedCount: number; duplicateCount: number; accounts: number }> {
   if (!input.accounts.length || input.accounts.length > 50 || new Set(input.accounts.map((a) => a.identityHash)).size !== input.accounts.length ||
     new Set(input.accounts.map((a) => a.providerAccountId)).size !== input.accounts.length) throw conflict("Bank account snapshot is incomplete or duplicated");
@@ -230,20 +302,42 @@ export async function applyBankConnectionSnapshot(input: {
   ];
   const stagedTransfers: TransferDetectionTransaction[] = [];
   let importedCount = 0; let duplicateCount = 0;
-  for (const account of input.accounts) {
-    if (!Number.isSafeInteger(account.balanceCents)) throw conflict("Bank balance must be integer cents");
-    const link = await prepareLinkedBankAccount({ connectionId: input.connectionId, ...account });
-    statements.push(...link.statements);
-    const result = await ingestTransactions({ accountId: link.accountId, source: "open_banking", filename: "Open Banking sync",
-      transactions: account.transactions, bankConnectionId: input.connectionId, bankBalanceCents: account.balanceCents, deferredStatements: statements, deferredTransfers: stagedTransfers });
-    importedCount += result.importedCount; duplicateCount += result.duplicateCount;
-  }
-  // Links, every account's transactions and all balance checkpoints share one
-  // SQLite transaction. Any conflict rolls back the entire connection snapshot.
-  try { await db.batch(statements); }
-  catch (error) {
-    if (error instanceof Error && /claim = 1/.test(error.message)) throw conflict("Bank connection changed during sync; retry from the current connection");
-    throw error;
+  try {
+    for (const account of input.accounts) {
+      if (!Number.isSafeInteger(account.balanceCents) || account.coverageFrom > account.coverageThrough ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(account.coverageFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(account.coverageThrough)) throw conflict("Bank snapshot range or balance is invalid");
+      const link = await prepareLinkedBankAccount({ connectionId: input.connectionId, ...account });
+      statements.push(...link.statements);
+      const result = await ingestTransactions({ accountId: link.accountId, source: "open_banking", filename: "Open Banking sync",
+        transactions: account.transactions, bankConnectionId: input.connectionId, bankBalanceCents: account.balanceCents, deferredStatements: statements, deferredTransfers: stagedTransfers });
+      importedCount += result.importedCount; duplicateCount += result.duplicateCount;
+      // Record coverage with the snapshot, never separately. A lapse beyond the
+      // provider's 90-day window creates a permanent, visible history-gap flag.
+      statements.push({
+        sql: `INSERT INTO bank_account_sync_coverage (account_id, first_date, last_date, has_gap, updated_at)
+          VALUES (?, ?, ?, 0, ?) ON CONFLICT(account_id) DO UPDATE SET
+          has_gap = CASE WHEN last_date < date(excluded.first_date, '-1 day') OR
+            excluded.last_date < date(first_date, '-1 day') THEN 1 ELSE has_gap END,
+          first_date = MIN(first_date, excluded.first_date), last_date = MAX(last_date, excluded.last_date),
+          updated_at = excluded.updated_at`,
+        args: [link.accountId, account.coverageFrom, account.coverageThrough, new Date().toISOString()],
+      });
+    }
+    await db.batch(statements);
+  } catch (error) {
+    // A staged rejected import never committed. Publish a separate durable,
+    // non-sensitive failed run only after the entire financial batch rolled back.
+    const importId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await db.execute({ sql: `INSERT INTO imports
+      (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
+       ambiguous_count, error_count, error_summary, created_at, completed_at, bank_connection_id)
+      VALUES (?, 'Open Banking sync', 'open_banking', NULL, 'failed', 0, 0, 0, 0, 1, 'Bank snapshot rejected; no financial changes applied', ?, ?, ?)`,
+      args: [importId, now, now, input.connectionId] });
+    if (error instanceof Error) {
+      throw Object.assign(error, { importId });
+    }
+    throw Object.assign(new Error("Bank snapshot rejected"), { status: 409, importId });
   }
   return { importedCount, duplicateCount, accounts: input.accounts.length };
 }
@@ -761,9 +855,17 @@ export async function decideIngestedTransferCandidate(
     throw conflict("This transfer candidate has already been decided");
   }
   const transferGroupId = crypto.randomUUID();
-  await db.batch(decideTransferCandidateStatements({
-    candidateId: id, decision, transferGroupId, now: new Date().toISOString(),
-  }));
+  try {
+    await db.batch(decideTransferCandidateStatements({
+      candidateId: id, decision, transferGroupId, now: new Date().toISOString(),
+    }));
+  } catch (error) {
+    // A stale decision or overlapping candidate must roll back both leg updates.
+    if (error instanceof Error && /constraint|check/i.test(error.message)) {
+      throw conflict("Transfer candidate changed; reload and review");
+    }
+    throw error;
+  }
   const updated = await one("SELECT status, transfer_group_id FROM ingested_transfer_candidates WHERE id = ?", [id]);
   const expectedStatus = decision === "confirm" ? "confirmed" : decision === "reject" ? "rejected" : "deferred";
   if (updated?.status !== expectedStatus) {

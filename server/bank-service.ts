@@ -6,8 +6,8 @@ import { BankProviderError, type BankInstitution, type BankProviderClient } from
 import {
   consumeBankConsentAttempt, createBankConnection, createBankConsentAttempt,
   applyBankConnectionSnapshot, getAppData, getBankConnectionForSync,
-  hashBankConsentState, listBankConnections,
-  markBankConnection,
+  hashBankConsentState, listBankConnections, listBankSyncCoverage, listMappedBankAccounts,
+  confirmBankAccountMapping, markBankConnection,
 } from "./repository.ts";
 
 const clients: Record<string, BankProviderClient> = {
@@ -38,6 +38,7 @@ async function eligibleInstitutions(adapter: BankProviderClient): Promise<BankIn
 export async function bankConnectionsResponse(adapter: BankProviderClient = clients[selectedProvider()] ?? clients["gocardless-bank-account-data"]): Promise<BankConnectionsResponse> {
   const connections = await listBankConnections();
   const accounts = (await getAppData()).accounts;
+  const coverage = new Map((await listBankSyncCoverage()).map((row) => [row.accountId, row]));
   let institutions: BankInstitution[] = [];
   let reason = "BBVA Italy provider access has not been verified and configured.";
   if (configuredInstitutionId()) {
@@ -53,12 +54,17 @@ export async function bankConnectionsResponse(adapter: BankProviderClient = clie
     ...(!institutions.length ? { reason } : { institutions: institutions.map(({ id, name }) => ({ id, name })) }),
     connections: connections.map((connection) => ({
       id: connection.id, provider: connection.provider, institutionId: connection.institutionId,
-      institutionName: connection.institutionName, status: connection.status,
+      institutionName: connection.institutionName,
+      status: connection.status === "connected" && connection.consentExpiresAt &&
+        connection.consentExpiresAt <= new Date().toISOString() ? "reauth_required" : connection.status,
       expiresAt: connection.consentExpiresAt, lastSyncedAt: connection.lastSyncedAt,
-      lastError: connection.safeErrorCode,
+      lastError: connection.status === "connected" && connection.consentExpiresAt &&
+        connection.consentExpiresAt <= new Date().toISOString() ? "consent_expired" : connection.safeErrorCode,
       accounts: connection.accounts.map(({ accountId }) => {
         const account = accounts.find((item) => item.id === accountId);
-        return { id: accountId, accountId, name: account?.name ?? "Bank account", currency: account?.currency ?? "EUR" };
+        const interval = coverage.get(accountId);
+        return { id: accountId, accountId, name: account?.name ?? "Bank account", currency: account?.currency ?? "EUR",
+          historyFrom: interval?.from ?? null, historyThrough: interval?.through ?? null, historyGap: interval?.hasGap ?? false };
       }),
     })),
   };
@@ -112,13 +118,91 @@ export async function completeBankConsent(input: {
   }
 }
 
+/** Fetch owner-visible mapping candidates only on an authenticated, explicit request. */
+export async function bankAccountMappingChoices(id: string, adapter?: BankProviderClient): Promise<{
+  providerAccounts: { providerAccountId: string; label: string; balanceCents: number | null; mappedAccountId: string | null }[];
+}> {
+  const connection = await getBankConnectionForSync(id);
+  if (!connection) throw safeError(404, "Bank connection not found");
+  if (connection.status === "connected" && connection.consentExpiresAt &&
+      connection.consentExpiresAt <= new Date().toISOString()) {
+    await markBankConnection(id, "reauth_required", "consent_expired", connection.syncRevision);
+    throw safeError(409, "Bank connection requires reconnection");
+  }
+  if (!configuredInstitutionId(connection.provider)) throw safeError(503, "Bank sync is disabled or not verified");
+  adapter ??= clientFor(connection.provider);
+  if (adapter.providerId !== connection.provider || connection.status !== "connected") throw safeError(409, "Bank connection requires reconnection");
+  if (connection.consentExpiresAt && connection.consentExpiresAt <= new Date().toISOString()) {
+    await markBankConnection(id, "reauth_required", "consent_expired", connection.syncRevision);
+    throw safeError(409, "Bank connection requires reconnection");
+  }
+  const session = await adapter.getRequisition(connection.providerConnectionId);
+  if (session.institutionId !== connection.institutionId || session.status !== "LN" ||
+    !session.accounts.length || session.accounts.length > 50 ||
+    new Set(session.accounts).size !== session.accounts.length) throw safeError(409, "Bank account list needs reauthorization");
+  const mapped = new Map((await listMappedBankAccounts(id)).map((item) => [item.providerAccountId, item.accountId]));
+  const providerAccounts = await Promise.all(session.accounts.map(async (providerAccountId, index) => {
+    const [account, balances] = await Promise.all([adapter!.getAccount(providerAccountId), adapter!.getBalances(providerAccountId)]);
+    if (account.id !== providerAccountId || account.status !== "READY") throw safeError(422, "Bank account is unavailable");
+    const booked = balances.find((item) => item.type === "interimBooked" || item.type === "closingBooked");
+    return { providerAccountId, label: account.name?.slice(0, 100) || `Bank account ${index + 1}`,
+      balanceCents: booked?.amountCents ?? null, mappedAccountId: mapped.get(providerAccountId) ?? null };
+  }));
+  return { providerAccounts };
+}
+
+/** Explicit owner choice; the provider proves the identity, not the browser. */
+export async function mapBankAccount(id: string, providerAccountId: string, accountId: string | null, adapter?: BankProviderClient): Promise<string> {
+  const connection = await getBankConnectionForSync(id);
+  if (!connection) throw safeError(404, "Bank connection not found");
+  if (connection.status === "connected" && connection.consentExpiresAt &&
+      connection.consentExpiresAt <= new Date().toISOString()) {
+    await markBankConnection(id, "reauth_required", "consent_expired", connection.syncRevision);
+    throw safeError(409, "Bank connection requires reconnection");
+  }
+  if (!configuredInstitutionId(connection.provider)) throw safeError(503, "Bank sync is disabled or not verified");
+  adapter ??= clientFor(connection.provider);
+  if (adapter.providerId !== connection.provider || connection.status !== "connected" ||
+    (connection.consentExpiresAt && connection.consentExpiresAt <= new Date().toISOString())) throw safeError(409, "Bank connection requires reconnection");
+  const session = await adapter.getRequisition(connection.providerConnectionId);
+  if (session.status !== "LN" || session.institutionId !== connection.institutionId ||
+      !session.accounts.includes(providerAccountId) || new Set(session.accounts).size !== session.accounts.length ||
+      (session.expiresAt && session.expiresAt <= new Date().toISOString())) throw safeError(409, "Bank account is unavailable for mapping");
+  const bankAccount = await adapter.getAccount(providerAccountId);
+  if (bankAccount.id !== providerAccountId || bankAccount.status !== "READY") throw safeError(422, "Bank account is unavailable");
+  const identity = stableBankIdentity(connection.provider, session, providerAccountId, bankAccount.iban);
+  const identityHash = await hashBankConsentState(`${connection.provider}\u001f${connection.institutionId}\u001f${identity}`);
+  return confirmBankAccountMapping({ connectionId: id, providerAccountId, identityHash, accountId });
+}
+
+function stableBankIdentity(provider: string, requisition: { accountIdentities?: Record<string, string> },
+  providerAccountId: string, iban: string | null): string {
+  if (provider === "enable-banking") {
+    const identity = requisition.accountIdentities?.[providerAccountId];
+    if (!identity) throw safeError(422, "Stable bank account identity is unavailable");
+    return identity;
+  }
+  const normalized = iban?.replace(/\s/g, "").toUpperCase();
+  if (!normalized || !/^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/.test(normalized)) throw safeError(422, "Stable bank account identity is unavailable");
+  return normalized;
+}
+
 export async function syncBankConnection(id: string, adapter?: BankProviderClient): Promise<{ importedCount: number; duplicateCount: number; accounts: number }> {
   const connection = await getBankConnectionForSync(id);
   if (!connection) throw safeError(404, "Bank connection not found");
+  if (connection.status === "connected" && connection.consentExpiresAt &&
+      connection.consentExpiresAt <= new Date().toISOString()) {
+    await markBankConnection(id, "reauth_required", "consent_expired", connection.syncRevision);
+    throw safeError(409, "Bank connection requires reconnection");
+  }
   if (!configuredInstitutionId(connection.provider)) throw safeError(503, "Bank sync is disabled or not verified");
   adapter ??= clientFor(connection.provider);
   const provider = adapter.providerId ?? connection.provider;
-  if (connection.provider !== provider || connection.status !== "connected" || (connection.consentExpiresAt !== null && connection.consentExpiresAt <= new Date().toISOString())) throw safeError(409, "Bank connection requires reconnection");
+  if (connection.provider !== provider || connection.status !== "connected") throw safeError(409, "Bank connection requires reconnection");
+  if (connection.consentExpiresAt !== null && connection.consentExpiresAt <= new Date().toISOString()) {
+    await markBankConnection(id, "reauth_required", "consent_expired", connection.syncRevision);
+    throw safeError(409, "Bank connection requires reconnection");
+  }
   try {
     const requisition = await adapter.getRequisition(connection.providerConnectionId);
     if (requisition.institutionId !== connection.institutionId) throw safeError(422, "Bank institution does not match the connection");
@@ -136,23 +220,18 @@ export async function syncBankConnection(id: string, adapter?: BankProviderClien
         adapter!.getAccount(providerAccountId), adapter!.getBalances(providerAccountId),
         adapter!.getTransactions(providerAccountId, { from: from.toISOString().slice(0, 10), to }),
       ]);
-      if (account.id !== providerAccountId || account.status !== "READY" || transactions.length > 2000) throw safeError(422, "Bank account data is incomplete");
+      if (account.id !== providerAccountId || account.status !== "READY" || transactions.length > 2000 ||
+        transactions.some((transaction) => !transaction.externalId?.trim())) throw safeError(422, "Bank account data lacks stable transaction identities");
       // Available balances can include pending card holds. Only a booked
       // balance can reconcile the app's cleared-transaction ledger.
       const balance = balances.find((item) => item.type === "interimBooked") ??
         balances.find((item) => item.type === "closingBooked");
       if (!balance || (balance.type === "closingBooked" && balance.referenceDate !== to) ||
         (balance.referenceDate !== null && balance.referenceDate !== to)) throw safeError(422, "Bank booked balance is missing or stale");
-      let identity: string;
-      if (adapter!.providerId === "enable-banking") {
-        identity = requisition.accountIdentities?.[providerAccountId] ?? "";
-        if (!identity) throw safeError(422, "Stable bank account identity is unavailable");
-      } else {
-        if (!account.iban || !/^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/.test(account.iban.replace(/\s/g, "").toUpperCase())) throw safeError(422, "Stable bank account identity is unavailable");
-        identity = account.iban.replace(/\s/g, "").toUpperCase();
-      }
+      const identity = stableBankIdentity(provider, requisition, providerAccountId, account.iban);
       const identityHash = await hashBankConsentState(`${provider}\u001f${connection.institutionId}\u001f${identity}`);
-      return { providerAccountId, identityHash, name: "Bank account", balanceCents: balance.amountCents, transactions };
+      return { providerAccountId, identityHash, name: "Bank account", balanceCents: balance.amountCents, transactions,
+        coverageFrom: from.toISOString().slice(0, 10), coverageThrough: to };
     }));
     return await applyBankConnectionSnapshot({ connectionId: id, provider, expectedRevision: connection.syncRevision, accounts: snapshots });
   } catch (error) {

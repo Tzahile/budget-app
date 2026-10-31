@@ -2,8 +2,8 @@ import { db } from "../server/db.ts";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { useTestSqlite } from "./support/val-sqlite.ts";
-import { createBankConnection, getAppData, listBankConnections } from "../server/repository.ts";
-import { disconnectBankConnection, syncBankConnection } from "../server/bank-service.ts";
+import { createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections } from "../server/repository.ts";
+import { disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
 import { createGoCardlessClient } from "../server/gocardless.ts";
 
 let database: DatabaseSync;
@@ -157,4 +157,70 @@ it("refuses a stale closing booked balance instead of reconciling today's ledger
   } as unknown as ReturnType<typeof createGoCardlessClient>;
   await expect(syncBankConnection(id, adapter)).rejects.toMatchObject({ status: 422 });
   expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_links WHERE connection_id = ?").get(id)!.n).toBe(0);
+});
+
+it("requires explicit mapping of an existing household account and preserves cash totals", async () => {
+  await createAccount({ name: "Synthetic manually maintained bank", type: "checking", balanceCents: 10_000 });
+  const local = (await getAppData()).accounts.find((account) => account.name === "Synthetic manually maintained bank")!;
+  const initialCount = database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n;
+  const id = await createBankConnection({ provider: "gocardless-bank-account-data", providerConnectionId: "manual-map-requisition",
+    institutionId: "it-synthetic", institutionName: "Synthetic", countryCode: "IT" });
+  const adapter = {
+    providerId: "gocardless-bank-account-data",
+    getRequisition: async () => ({ status: "LN", accounts: ["manual-provider-account"], institutionId: "it-synthetic" }),
+    getAccount: async (id: string) => ({ id, status: "READY", name: "Synthetic bank", iban: "IT60X0542811101000000888888" }),
+    getBalances: async () => [{ amountCents: 10_000, type: "interimBooked", referenceDate: null }],
+    getTransactions: async () => [{ occurredOn: "2026-10-12", amountCents: 200, description: "Synthetic deposit", externalId: "map-entry" }],
+  } as unknown as ReturnType<typeof createGoCardlessClient>;
+  await expect(syncBankConnection(id, adapter)).rejects.toMatchObject({ status: 409 });
+  expect(database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n).toBe(initialCount);
+  expect((await getAppData()).accounts.find((account) => account.id === local.id)?.balanceCents).toBe(10_000);
+  expect(await mapBankAccount(id, "manual-provider-account", local.id, adapter)).toBe(local.id);
+  expect(await syncBankConnection(id, adapter)).toEqual({ importedCount: 1, duplicateCount: 0, accounts: 1 });
+  expect(database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n).toBe(initialCount);
+  expect((await getAppData()).accounts.find((account) => account.id === local.id)?.balanceCents).toBe(10_000);
+  expect(await syncBankConnection(id, adapter)).toEqual({ importedCount: 0, duplicateCount: 1, accounts: 1 });
+  const coverage = database.prepare("SELECT * FROM bank_account_sync_coverage WHERE account_id = ?").get(local.id) as Record<string, unknown>;
+  expect(coverage.first_date).toBeTruthy();
+  expect(coverage.has_gap).toBe(0);
+  database.prepare("UPDATE bank_account_sync_coverage SET first_date = '2020-01-01', last_date = '2020-01-02' WHERE account_id = ?").run(local.id);
+  await syncBankConnection(id, adapter);
+  expect(database.prepare("SELECT has_gap FROM bank_account_sync_coverage WHERE account_id = ?").get(local.id)).toMatchObject({ has_gap: 1 });
+});
+
+it("persists a real failed import audit ID without partial financial writes", async () => {
+  const id = await createBankConnection({ provider: "gocardless-bank-account-data", providerConnectionId: "rejected-sync",
+    institutionId: "it-synthetic", institutionName: "Synthetic", countryCode: "IT" });
+  const adapter = {
+    providerId: "gocardless-bank-account-data",
+    getRequisition: async () => ({ status: "LN", accounts: ["rejected-provider-account"], institutionId: "it-synthetic" }),
+    getAccount: async (id: string) => ({ id, status: "READY", name: "Synthetic", iban: "IT60X0542811101000000999999" }),
+    getBalances: async () => [{ amountCents: 400, type: "interimBooked", referenceDate: null }],
+    getTransactions: async () => [
+      { occurredOn: "2026-10-12", amountCents: 100, description: "Synthetic transaction A", externalId: "conflicting-id" },
+      { occurredOn: "2026-10-12", amountCents: 200, description: "Synthetic transaction B", externalId: "conflicting-id" },
+    ],
+  } as unknown as ReturnType<typeof createGoCardlessClient>;
+  await mapBankAccount(id, "rejected-provider-account", null, adapter);
+  const before = database.prepare("SELECT COUNT(*) AS n FROM transactions").get()!.n;
+  let importId: string | undefined;
+  try { await syncBankConnection(id, adapter); }
+  catch (error) { importId = (error as { importId?: string }).importId; }
+  expect(importId).toBeTruthy();
+  expect(database.prepare("SELECT status, account_id FROM imports WHERE id = ?").get(importId!)).toMatchObject({
+    status: "failed", account_id: null,
+  });
+  expect((await getIngestionHistory()).some((run) => run.id === importId && run.status === "failed")).toBe(true);
+  expect(database.prepare("SELECT COUNT(*) AS n FROM transactions").get()!.n).toBe(before);
+});
+
+it("marks locally expired consent as requiring reauthorization before provider requests", async () => {
+  const id = await createBankConnection({ provider: "gocardless-bank-account-data", providerConnectionId: "expired-consent",
+    institutionId: "it-synthetic", institutionName: "Synthetic", countryCode: "IT",
+    consentExpiresAt: "2020-01-01T00:00:00.000Z" });
+  const adapter = { providerId: "gocardless-bank-account-data", getRequisition: vi.fn() } as unknown as ReturnType<typeof createGoCardlessClient>;
+  await expect(syncBankConnection(id, adapter)).rejects.toMatchObject({ status: 409 });
+  expect(adapter.getRequisition).not.toHaveBeenCalled();
+  expect(database.prepare("SELECT status, safe_error_code FROM bank_connections WHERE id = ?").get(id))
+    .toMatchObject({ status: "reauth_required", safe_error_code: "consent_expired" });
 });

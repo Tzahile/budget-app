@@ -125,7 +125,7 @@ export function App() {
               onAccount={() => setEditor({ type: "account" })}
               onCleanupDemo={cleanupDemo}
             />
-            <BankConnections onAction={mutate} />
+            <BankConnections onAction={mutate} accounts={data.accounts} />
           </>
         ) : view === "overview" ? (
           <Overview
@@ -353,14 +353,43 @@ function Reserves({ data, onAdd, onEdit, onDelete }: { data: AppData; onAdd: () 
 
 function Accounts({ data, onAdd, onEdit, onReconcile, onDelete, onBankAction }: { data: AppData; onAdd: () => void; onEdit: (item: Account) => void; onReconcile: (item: Account) => void; onDelete: (id: string) => void; onBankAction: (path: string, method: string) => Promise<void> }) {
   const accounts = useMemo(() => Object.fromEntries(data.accounts.map((account) => [account.id, account.name])), [data.accounts]);
-  return <Page title="Accounts" subtitle="Balances are current cleared amounts. Use reconciliation to align one with the bank." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton>{item.isActive && <SmallButton primary onClick={() => onReconcile(item)}>Reconcile</SmallButton>}<SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div><BankConnections onAction={onBankAction} />{data.accountReconciliations.length > 0 && <section className="mt-8"><SectionTitle title="Reconciliation history" subtitle="Balance checkpoints retained for audit" /><div className="mt-3 divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.accountReconciliations.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 py-4"><div className="min-w-0 flex-1"><p className="font-medium">{accounts[item.accountId] ?? "Unknown account"}</p><p className="text-xs text-stone-400">{prettyDate(item.date)} · {money(item.previousBalanceCents)} → {money(item.actualBalanceCents)}{item.note ? ` · ${item.note}` : ""}</p></div><Amount cents={item.differenceCents} /></div>)}</div></section>}</Page>;
+  return <Page title="Accounts" subtitle="Balances are current cleared amounts. Use reconciliation to align one with the bank." action="Add account" onAction={onAdd}><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{data.accounts.map((item) => <Card key={item.id} inactive={!item.isActive}><p className="text-xs font-medium uppercase tracking-wider text-stone-400">{item.type}</p><h3 className="mt-2 font-semibold">{item.name}</h3><p className="mt-5 text-2xl font-semibold">{money(item.balanceCents)}</p><div className="mt-5 flex justify-end gap-2"><SmallButton onClick={() => onEdit(item)}>Edit</SmallButton>{item.isActive && <SmallButton primary onClick={() => onReconcile(item)}>Reconcile</SmallButton>}<SmallButton onClick={() => onDelete(item.id)}>Delete</SmallButton></div></Card>)}</div><BankConnections onAction={onBankAction} accounts={data.accounts} />{data.accountReconciliations.length > 0 && <section className="mt-8"><SectionTitle title="Reconciliation history" subtitle="Balance checkpoints retained for audit" /><div className="mt-3 divide-y divide-stone-100 rounded-2xl border border-stone-200 bg-white px-4 sm:px-5">{data.accountReconciliations.map((item) => <div key={item.id} className="flex flex-wrap items-center gap-3 py-4"><div className="min-w-0 flex-1"><p className="font-medium">{accounts[item.accountId] ?? "Unknown account"}</p><p className="text-xs text-stone-400">{prettyDate(item.date)} · {money(item.previousBalanceCents)} → {money(item.actualBalanceCents)}{item.note ? ` · ${item.note}` : ""}</p></div><Amount cents={item.differenceCents} /></div>)}</div></section>}</Page>;
 }
 
-function BankConnections({ onAction }: { onAction: (path: string, method: string) => Promise<void> }) {
+function BankConnections({ onAction, accounts }: { onAction: (path: string, method: string, body?: unknown) => Promise<void>; accounts: Account[] }) {
   const [result, setResult] = useState<BankConnectionsResponse | null>(null);
   const [institutionId, setInstitutionId] = useState("");
   const [error, setError] = useState("");
   const [working, setWorking] = useState<string | null>(null);
+  const [mappingConnection, setMappingConnection] = useState<string | null>(null);
+  const [mappingChoices, setMappingChoices] = useState<{ providerAccounts: {
+    providerAccountId: string; label: string; balanceCents: number | null; mappedAccountId: string | null;
+  }[] } | null>(null);
+  const [mappingSelection, setMappingSelection] = useState<Record<string, string>>({});
+  const openMapping = async (id: string) => {
+    setWorking("mapping"); setError("");
+    try {
+      const choices = await api<{ providerAccounts: { providerAccountId: string; label: string; balanceCents: number | null; mappedAccountId: string | null }[] }>(
+        `/api/bank/connections/${encodeURIComponent(id)}/mappings`);
+      setMappingChoices(choices); setMappingConnection(id); setMappingSelection({});
+    } catch (err) { setError(messageOf(err)); }
+    finally { setWorking(null); }
+  };
+  const saveMapping = async (providerAccountId: string) => {
+    if (!mappingConnection) return;
+    const selection = mappingSelection[providerAccountId];
+    if (!selection || !confirmed(selection === "new"
+      ? "Create a separate household bank account? This must not represent an existing account."
+      : "Link this bank account to the selected household account? Its balance will be reconciled on the next sync.")) return;
+    setWorking("mapping"); setError("");
+    try {
+      await onAction(`/api/bank/connections/${encodeURIComponent(mappingConnection)}/mappings`, "POST",
+        { providerAccountId, accountId: selection === "new" ? null : selection });
+      await openMapping(mappingConnection);
+      await refresh();
+    } catch (err) { setError(messageOf(err)); }
+    finally { setWorking(null); }
+  };
   const refresh = useCallback(async () => setResult(await api<BankConnectionsResponse>("/api/bank/connections")), []);
   useEffect(() => { refresh().catch((err) => setError(messageOf(err))); }, [refresh]);
   const act = async (id: string, method: "POST" | "DELETE") => {
@@ -394,9 +423,33 @@ function BankConnections({ onAction }: { onAction: (path: string, method: string
       {result.available && result.connections.length === 0 && <p className="mt-3 text-sm text-stone-500">No bank is connected.</p>}
       {result.connections.length > 0 && <div className="mt-3 divide-y divide-stone-100">{result.connections.map((connection) => <div key={connection.id} className="flex flex-wrap items-start justify-between gap-3 py-4">
         <div><p className="font-medium">{connection.institutionName}</p><p className="mt-1 text-xs text-stone-500">{connection.provider} · {connection.status.replaceAll("_", " ")}{connection.lastSyncedAt ? ` · Last sync ${new Date(connection.lastSyncedAt).toLocaleString("en-GB")}` : ""}{connection.expiresAt ? ` · Consent expires ${new Date(connection.expiresAt).toLocaleDateString("en-GB")}` : ""}</p>
-          <p className="mt-1 text-xs text-stone-500">{connection.accounts.map((account) => account.name).join(", ") || "No mapped accounts"}</p>{connection.lastError && <p className="mt-1 text-sm text-amber-800">{connection.lastError}</p>}</div>
-        <div className="flex gap-2">{connection.status === "reauth_required" && result.available && result.institutions?.some((institution) => institution.id === connection.institutionId) && <SmallButton onClick={() => void connect(connection.institutionId)} disabled={working !== null}>Reconnect</SmallButton>}<SmallButton onClick={() => void act(connection.id, "POST")} disabled={working !== null || connection.status !== "connected"}>Sync now</SmallButton><SmallButton onClick={() => void act(connection.id, "DELETE")} disabled={working !== null}>Disconnect</SmallButton></div>
+          <p className="mt-1 text-xs text-stone-500">{connection.accounts.map((account) => account.name).join(", ") || "No mapped accounts"}</p>
+          {connection.accounts.map((account) => account.historyFrom && <p key={account.id} className="mt-1 text-xs text-amber-800">
+            {account.name}: imported history {account.historyFrom} to {account.historyThrough}. Earlier history was not retrieved.
+            {account.historyGap ? " A gap between sync windows cannot be recovered automatically; use a verified statement import to restore history." : ""}
+          </p>)}
+          {connection.lastError && <p className="mt-1 text-sm text-amber-800">{connection.lastError}</p>}</div>
+        <div className="flex flex-wrap gap-2">{connection.status === "connected" && <SmallButton onClick={() => void openMapping(connection.id)} disabled={working !== null}>Map accounts</SmallButton>}{connection.status === "reauth_required" && result.available && result.institutions?.some((institution) => institution.id === connection.institutionId) && <SmallButton onClick={() => void connect(connection.institutionId)} disabled={working !== null}>Reconnect</SmallButton>}<SmallButton onClick={() => void act(connection.id, "POST")} disabled={working !== null || connection.status !== "connected"}>Sync now</SmallButton><SmallButton onClick={() => void act(connection.id, "DELETE")} disabled={working !== null}>Disconnect</SmallButton></div>
       </div>)}</div>}
+      {mappingConnection && mappingChoices && <div className="mt-4 rounded-xl border border-stone-200 p-4">
+        <div className="flex items-center justify-between gap-3"><p className="font-medium">Confirm bank account ownership mapping</p>
+          <SmallButton onClick={() => { setMappingConnection(null); setMappingChoices(null); }}>Close</SmallButton></div>
+        <p className="mt-2 text-sm text-stone-600">A bank account already represented here must link to that existing account. Creating a separate account for the same balance doubles household cash.</p>
+        {mappingChoices.providerAccounts.map((bank) => <div key={bank.providerAccountId} className="mt-4 border-t border-stone-100 pt-3">
+          <p className="text-sm font-medium">{bank.label}{bank.balanceCents !== null ? ` · Booked balance ${money(bank.balanceCents)}` : ""}</p>
+          {bank.mappedAccountId ? <p className="mt-1 text-sm text-stone-500">Mapped to {accounts.find((account) => account.id === bank.mappedAccountId)?.name ?? "Local account"}</p>
+            : <div className="mt-2 flex flex-wrap items-center gap-2"><label className="text-sm">Local account
+                <select aria-label={`Map ${bank.label}`} className="ml-2 rounded-lg border border-stone-300 bg-white px-2 py-2"
+                  value={mappingSelection[bank.providerAccountId] ?? ""}
+                  onChange={(event) => setMappingSelection((current) => ({ ...current, [bank.providerAccountId]: event.currentTarget.value }))}>
+                  <option value="">Select decision</option>
+                  {accounts.filter((account) => account.isActive && account.currency === "EUR" && account.type !== "cash")
+                    .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
+                  <option value="new">Create a separate bank account</option>
+                </select></label>
+                <SmallButton disabled={working !== null || !mappingSelection[bank.providerAccountId]} onClick={() => void saveMapping(bank.providerAccountId)}>Confirm mapping</SmallButton></div>}
+        </div>)}
+      </div>}
     </>}
   </section>;
 }

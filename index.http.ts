@@ -37,7 +37,7 @@ import { csvHeaders, parseCsvTransactions, type CsvColumnMapping } from "./serve
 import { readXlsxWorkbook, parseXlsxSheet } from "./server/xlsx.ts";
 import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile } from "./server/csv-profiles.ts";
 import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
-import { bankConnectionsResponse, beginBankConsent, completeBankConsent, disconnectBankConnection, syncBankConnection } from "./server/bank-service.ts";
+import { bankAccountMappingChoices, bankConnectionsResponse, beginBankConsent, completeBankConsent, disconnectBankConnection, mapBankAccount, syncBankConnection } from "./server/bank-service.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import { exportBackup } from "./server/backup.ts";
 import { parseTransactionFilters } from "./server/transaction-search.ts";
@@ -115,6 +115,20 @@ app.get("/api/bank/callback", async (c) => {
     origin: new URL(c.req.url).origin,
   });
   return c.redirect("/?bank=connected");
+});
+
+app.get("/api/bank/connections/:id/mappings", async (c) =>
+  c.json(await bankAccountMappingChoices(safeId(c.req.param("id")))));
+
+app.post("/api/bank/connections/:id/mappings", async (c) => {
+  const body = await readBody(c.req.raw);
+  const local = body.accountId;
+  if (local !== null && (typeof local !== "string" || !/^[0-9a-f-]{36}$/i.test(local))) {
+    throw new ValidationError("Invalid local account");
+  }
+  const accountId = await mapBankAccount(safeId(c.req.param("id")),
+    stringField(body, "providerAccountId", 200), local);
+  return c.json({ accountId }, 201);
 });
 
 app.post("/api/bank/connections/:id/sync", async (c) => c.json({

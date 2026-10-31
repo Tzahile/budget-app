@@ -60,7 +60,11 @@ becomes a test fixture, screenshot or repository artifact.
    that current terms/pricing fit the project, and authenticated catalog coverage is BBVA IT.
 2. The user starts consent while signed in to BudgetApp, verifies the provider/bank
    pages, completes SCA themselves and returns to the same authenticated callback session.
-3. Verify account list and booked EUR balance; explicitly sync complete booked transactions.
+3. Before first sync, open **Map accounts** and explicitly choose whether each
+   provider account represents an existing household account or a genuinely
+   separate new account. Use the displayed booked balance to verify the choice;
+   never create a duplicate household account for an existing balance.
+   Verify booked EUR balance, then sync complete booked transactions.
    Confirm dashboard cash and imported history against the bank privately.
 4. Repeat sync: no duplicate transactions or balance changes. Test a later incremental sync.
 5. Reconnect through a new provider session: local account IDs and cash must remain the same;
@@ -77,8 +81,27 @@ becomes a test fixture, screenshot or repository artifact.
 - **Provider outage or rate limit:** show a safe error code, leave previously
   ingested transactions and balances intact, and retry only on a later explicit
   user action. Do not treat a partial provider response as a complete snapshot.
-- **Ambiguous identity:** review the ingestion run. A transaction without a
-  stable provider ID must not be silently merged or discarded.
+- **Ambiguous identity:** a transaction without a stable provider entry reference
+  is rejected before any writes, even if its date/amount/description resemble a
+  prior transaction. Provider descriptions can change. Never fall back to a
+  descriptive fingerprint for automatic Open Banking ingestion.
+- **Existing account ownership:** sync refuses to create new household balances
+  while any active manually maintained checking/savings account is not mapped.
+  The authenticated owner must explicitly map a provider account to the matching
+  local account, or confirm that it is separate. Never infer ownership from
+  name, balance, IBAN, or account order. Use **Map accounts** on the Accounts
+  screen, then sync.
+- **Failed sync audit:** rejected staged snapshots roll back all balances and
+  transactions. A separate failed import record with a real ID and a non-sensitive
+  error summary is committed after the rollback. It contains no raw bank rows.
+- **History coverage:** the adapter requests only the recent bounded window
+  supported by the selected provider (currently 90 days by default). Each
+  successful account snapshot atomically records its covered dates. The UI
+  explicitly warns that earlier history may be absent; if successive windows
+  do not overlap or touch, it permanently marks a history gap. A live sync
+  cannot recover an older gap outside provider limits. Restore historical data
+  using verified statements with source-identity reconciliation, not guessed
+  or duplicated transactions.
 - **Disconnect:** revoke/delete the provider requisition when possible and
   disable further sync. Preserve the local transaction and ingestion history.
   A provider failure during revocation should leave an explicit error state for
@@ -108,3 +131,17 @@ never guesses a mapping from names or balances. Provider identifiers, consent st
 identity hashes and connection revision guards are excluded from portable backups.
 Only the consent-state digest and exact callback origin/path are stored; the raw
 callback state is not duplicated in stored redirect URLs.
+
+## Bank mapping API and audit safety
+
+Only authenticated same-origin household requests may use
+`GET /api/bank/connections/:id/mappings` to inspect provider-visible account
+choices and booked balances. `POST /api/bank/connections/:id/mappings` accepts
+`{ "providerAccountId": "...", "accountId": "<existing-local-UUID>" }` or
+`accountId: null` to explicitly create a separate account. The server obtains
+and hashes the bank's stable account identity; the browser cannot assert a hash
+or provide credentials. The choice and connection revision guard commit in a
+single database transaction. The mapping is retained across provider session
+reconnects. Failed sync attempts record a safe audit entry only after their
+financial snapshot has rolled back. Account-history start and gap flags are
+non-secret metadata but should not be interpreted as complete lifetime history.

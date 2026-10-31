@@ -153,9 +153,12 @@ export function createEnableBankingClient(options: {
           const positive = amount(item.transaction_amount); if (positive <= 0 || !["CRDT", "DBIT"].includes(String(item.credit_debit_indicator))) malformed();
           const lines = item.remittance_information == null ? [] : list(item.remittance_information, 20).map((v) => string(v, 500));
           const description = lines.join(" ") || "Bank transaction"; if (description.length > 500) malformed();
+          // Enable Banking transaction_id changes between sessions. A missing
+          // entry_reference cannot be safely deduplicated when descriptions change.
+          // Refuse the entire page before any financial writes.
+          const entryReference = string(item.entry_reference, 200);
           result.push({ occurredOn: date(item.booking_date), amountCents: positive * (item.credit_debit_indicator === "DBIT" ? -1 : 1), description,
-            // transaction_id is explicitly unstable across reads; only entry_reference can prove identity.
-            externalId: item.entry_reference == null ? null : string(item.entry_reference, 200), status: "cleared", auditMetadata: { adapter: "enable_banking" } });
+            externalId: entryReference, status: "cleared", auditMetadata: { adapter: "enable_banking" } });
           if (result.length > 2000) malformed();
         }
         if (data.continuation_key == null) return result;
