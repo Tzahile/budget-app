@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { db } from "../server/db.ts";
 import { detectIngestedTransferPairs, INGESTED_TRANSFER_DATE_TOLERANCE_DAYS } from "../server/ingested-transfers.ts";
 import { createAccount, decideIngestedTransferCandidate, getAppData, ingestTransactions } from "../server/repository.ts";
 import { useTestSqlite } from "./support/val-sqlite.ts";
@@ -65,6 +66,35 @@ describe("ingested internal transfer detection", () => {
     const repeated = await ingestTransactions({ accountId: savings.id, filename: "in-again.csv", source: "csv", transactions: incoming });
     expect(repeated).toMatchObject({ importedCount: 0, duplicateCount: 1 });
     expect((await getAppData("2026-09-30")).ingestedTransferCandidates).toHaveLength(1);
+  });
+
+  it("rolls back a conflicting confirmation at the SQL boundary", async () => {
+    await createAccount({ name: "Concurrent outgoing", type: "checking", balanceCents: 5000 });
+    await createAccount({ name: "Concurrent incoming", type: "checking", balanceCents: 5000 });
+    const local = (await getAppData()).accounts;
+    const from = local.find((account) => account.name === "Concurrent outgoing")!;
+    const to = local.find((account) => account.name === "Concurrent incoming")!;
+    await ingestTransactions({ accountId: from.id, source: "csv", filename: "concurrent-a.csv",
+      transactions: [{ occurredOn: "2026-10-11", amountCents: -3000, description: "Concurrent synthetic debit", externalId: "concurrent-out" }] });
+    await ingestTransactions({ accountId: to.id, source: "csv", filename: "concurrent-b.csv",
+      transactions: [{ occurredOn: "2026-10-11", amountCents: 3000, description: "Concurrent synthetic credit", externalId: "concurrent-in" }] });
+    const candidate = (await getAppData()).ingestedTransferCandidates.find((item) => item.status === "pending" &&
+      (database.prepare("SELECT description FROM transactions WHERE id = ?").get(item.outgoingTransactionId) as { description: string }).description === "Concurrent synthetic debit")!;
+    const originalBatch = db.batch.bind(db);
+    const spy = vi.spyOn(db, "batch").mockImplementationOnce(async (statements) => {
+      // Another actor has already claimed this debit. It must never be overwritten.
+      database.prepare("UPDATE transactions SET transfer_group_id = ? WHERE id = ?").run("other-transfer", candidate.outgoingTransactionId);
+      return originalBatch(statements);
+    });
+    try {
+      await expect(decideIngestedTransferCandidate(candidate.id, "confirm")).rejects.toMatchObject({ status: 409 });
+    } finally { spy.mockRestore(); }
+    const state = database.prepare("SELECT status, transfer_group_id FROM ingested_transfer_candidates WHERE id = ?").get(candidate.id) as Record<string, unknown>;
+    expect(state).toMatchObject({ status: "pending", transfer_group_id: null });
+    expect(database.prepare("SELECT transfer_group_id, kind FROM transactions WHERE id = ?").get(candidate.outgoingTransactionId))
+      .toMatchObject({ transfer_group_id: "other-transfer", kind: "expense" });
+    expect(database.prepare("SELECT transfer_group_id, kind FROM transactions WHERE id = ?").get(candidate.incomingTransactionId))
+      .toMatchObject({ transfer_group_id: null, kind: "income" });
   });
 
   it("persists rejection so repeated ingestion does not recreate the candidate", async () => {
