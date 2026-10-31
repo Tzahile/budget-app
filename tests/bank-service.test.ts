@@ -1,6 +1,6 @@
 import { db } from "../server/db.ts";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTestSqlite } from "./support/val-sqlite.ts";
 import { createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections } from "../server/repository.ts";
 import { disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
@@ -13,6 +13,7 @@ function useGoCardlessEnvironment() {
 }
 beforeAll(() => { database = new DatabaseSync(":memory:"); useTestSqlite(database); useGoCardlessEnvironment(); });
 afterAll(() => database.close());
+beforeEach(useGoCardlessEnvironment);
 
 describe("manual bank sync", () => {
   it("validates all provider accounts before writing, then replays idempotently and revokes", async () => {

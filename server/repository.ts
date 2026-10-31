@@ -179,7 +179,7 @@ async function prepareLinkedBankAccount(input: {
     const unmapped = await one(`SELECT 1 FROM accounts a WHERE a.is_active = 1 AND a.is_demo = 0
       AND a.type IN ('checking', 'savings')
       AND NOT EXISTS (SELECT 1 FROM bank_account_identities i WHERE i.account_id = a.id)
-      LIMIT 1`);
+      LIMIT 1`, []);
     if (unmapped) throw conflict("Bank account mapping is required before first sync");
     const legacy = await one(`SELECT 1 FROM bank_account_links l JOIN bank_connections c ON c.id = l.connection_id
       WHERE c.provider = ? AND c.institution_id = ? AND NOT EXISTS

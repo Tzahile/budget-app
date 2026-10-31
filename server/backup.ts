@@ -1,8 +1,8 @@
 import { db, ensureSchema } from "./db.ts";
 
 /** A backup is a versioned data artifact, not a raw database or provider dump. */
-export const BACKUP_FORMAT_VERSION = 3;
-export const BACKUP_SCHEMA_VERSION = 13;
+export const BACKUP_FORMAT_VERSION = 4;
+export const BACKUP_SCHEMA_VERSION = 14;
 
 // Review these projections and increment the format version when the schema
 // changes. In particular, never export tokens, raw provider payloads, or

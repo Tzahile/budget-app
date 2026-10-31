@@ -191,7 +191,7 @@ describe("database migrations", () => {
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 14 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 15 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
     expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
   });
