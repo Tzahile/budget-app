@@ -38,6 +38,9 @@ describe("bank sync storage and canonical ingestion", () => {
       institutionName: "Synthetic Bank", countryCode: "IT",
     });
     await linkBankAccount({ connectionId, accountId, providerAccountId: "provider-account-1" });
+    // The synthetic manually maintained account is already owner-mapped.
+    database.prepare("INSERT INTO bank_account_identities (provider, institution_id, identity_hash, account_id) VALUES (?, ?, ?, ?)")
+      .run("synthetic", "it-bank", "0".repeat(64), accountId);
     const transaction = { occurredOn: "2026-09-20", amountCents: 1250, description: "Synthetic transfer", externalId: "stable-1" };
     const first = await ingestBankAccountTransactions({
       connectionId, accountId, provider: "synthetic", transactions: [transaction], balanceCents: 5_000,
@@ -73,7 +76,7 @@ describe("bank sync storage and canonical ingestion", () => {
       provider: "synthetic", providerConnectionId: "connection-2", institutionId: "it-bank",
       institutionName: "Synthetic Bank", countryCode: "IT",
     });
-    const input = { connectionId, providerAccountId: "provider-account-2", name: "Synthetic linked" };
+    const input = { connectionId, providerAccountId: "provider-account-2", name: "Synthetic linked", identityHash: "a".repeat(64) };
     const accountId = await createLinkedBankAccount(input);
     expect(await createLinkedBankAccount(input)).toBe(accountId);
     expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)).toMatchObject({ balance_cents: 0 });
@@ -86,7 +89,7 @@ describe("bank sync storage and canonical ingestion", () => {
       provider: "synthetic", providerConnectionId: "connection-revision", institutionId: "it-bank",
       institutionName: "Synthetic Bank", countryCode: "IT",
     });
-    const accountId = await createLinkedBankAccount({ connectionId, providerAccountId: "revision-account", name: "Revision test" });
+    const accountId = await createLinkedBankAccount({ connectionId, providerAccountId: "revision-account", name: "Revision test", identityHash: "b".repeat(64) });
     const pending = { occurredOn: "2026-09-20", amountCents: -750, description: "Pending synthetic", externalId: "stable-revision", status: "pending" as const };
     await ingestBankAccountTransactions({ connectionId, accountId, provider: "synthetic", transactions: [pending] });
     expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)).toMatchObject({ balance_cents: 0 });

@@ -334,10 +334,12 @@ export async function applyBankConnectionSnapshot(input: {
        ambiguous_count, error_count, error_summary, created_at, completed_at, bank_connection_id)
       VALUES (?, 'Open Banking sync', 'open_banking', NULL, 'failed', 0, 0, 0, 0, 1, 'Bank snapshot rejected; no financial changes applied', ?, ?, ?)`,
       args: [importId, now, now, input.connectionId] });
-    if (error instanceof Error) {
+    // Only known, fixed validation errors may be forwarded. SQLite details
+    // can contain schema identifiers and are never safe HTTP error text.
+    if (error instanceof Error && error.message === "amount must be non-zero integer cents") {
       throw Object.assign(error, { importId });
     }
-    throw Object.assign(new Error("Bank snapshot rejected"), { status: 409, importId });
+    throw Object.assign(conflict("Bank snapshot rejected; no financial changes applied"), { importId });
   }
   return { importedCount, duplicateCount, accounts: input.accounts.length };
 }

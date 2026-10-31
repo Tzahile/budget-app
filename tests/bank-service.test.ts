@@ -62,7 +62,7 @@ describe("atomic connection snapshots and reconnect", () => {
     } as unknown as ReturnType<typeof createGoCardlessClient>;
     await expect(syncBankConnection(id, adapter)).rejects.toThrow("integer cents");
     expect(database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n).toBe(count);
-    expect(database.prepare("SELECT COUNT(*) AS n FROM imports WHERE bank_connection_id = ?").get(id)!.n).toBe(0);
+    expect(database.prepare("SELECT status FROM imports WHERE bank_connection_id = ?").get(id)).toMatchObject({ status: "failed" });
     expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(id)!.sync_revision).toBe(0);
   });
 
@@ -111,7 +111,7 @@ it("checks the connection revision at SQL commit, rolling back a concurrent disc
   try { await expect(syncBankConnection(id, adapter)).rejects.toMatchObject({ status: 409 }); }
   finally { spy.mockRestore(); }
   expect(database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n).toBe(count);
-  expect(database.prepare("SELECT COUNT(*) AS n FROM imports WHERE bank_connection_id = ?").get(id)!.n).toBe(0);
+  expect(database.prepare("SELECT status FROM imports WHERE bank_connection_id = ?").get(id)).toMatchObject({ status: "failed" });
 });
 
 it("uses gated Enable Banking consent/code exchange and the same canonical sync without raw identity persistence", async () => {
