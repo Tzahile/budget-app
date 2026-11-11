@@ -15,7 +15,7 @@ type Context = {
   payload: {
     workflow_run?: WorkflowRun;
     action?: string;
-    pull_request?: { merged: boolean; head: { ref: string; repo: { full_name: string } | null } };
+    pull_request?: { number: number; merged: boolean; head: { ref: string; repo: { full_name: string } | null } };
   };
 };
 type Dependencies = { github: { graphql: (query: string, variables?: Record<string, unknown>) => Promise<unknown> }; context: Context; core: { info: (message: string) => void; setFailed: (message: string) => void } };
@@ -40,10 +40,15 @@ const branchCreated = (overrides: Partial<WorkflowRun> = {}): Context => ({
 });
 const create = branchCreated();
 const pr = (action: string, merged = false, full_name = "Tzahile/budget-app"): Context => ({
-  eventName: "pull_request_target", payload: { action, pull_request: { merged, head: { ref: "issue-62-project-status-repair", repo: { full_name } } } },
+  eventName: "pull_request_target", payload: { action, pull_request: { number: 68, merged, head: { ref: "issue-62-project-status-repair", repo: { full_name } } } },
 });
 
 function harness(initial = statuses()) {
+  const lifecycle = {
+    issueClosed: false, branchExists: true, pullState: null as "OPEN" | "CLOSED" | "MERGED" | null,
+    mergedAt: "2026-11-11T14:00:00Z", reopenedAt: null as string | null,
+  };
+  const headRepository = { nameWithOwner: "Tzahile/budget-app" };
   let options = structuredClone(initial);
   const items: Item[] = [
     { id: "linked", content: { number: 62, repository: { nameWithOwner: "Tzahile/budget-app", isPrivate: false } }, fieldValueByName: { optionId: "Ready", name: "Ready" } },
@@ -54,7 +59,17 @@ function harness(initial = statuses()) {
   const core = { info: vi.fn<(message: string) => void>(), setFailed: vi.fn<(message: string) => void>() };
   const graphql = vi.fn<Dependencies["github"]["graphql"]>(async (query, variables = {}) => {
     if (query.includes("query StatusProjects")) return { user: { projectsV2: { nodes: [{ id: "project", title: "@Tzahile's budgetApp project" }], pageInfo: { hasNextPage: false } } } };
-    if (query.includes("query StatusIssue")) return { repository: { issue: { id: "issue62" } } };
+    if (query.includes("query StatusBranch")) return { repository: {
+      issue: { closed: lifecycle.issueClosed },
+      ref: lifecycle.branchExists ? { name: variables.branch } : null,
+      pullRequests: { nodes: lifecycle.pullState ? [{ headRepository }] : [], pageInfo: { hasNextPage: false } },
+    } };
+    if (query.includes("query StatusPullRequest")) return { repository: {
+      issue: { closed: lifecycle.issueClosed, timelineItems: { nodes: lifecycle.reopenedAt ? [{ createdAt: lifecycle.reopenedAt }] : [] } },
+      pullRequest: lifecycle.pullState ? {
+        state: lifecycle.pullState, mergedAt: lifecycle.mergedAt, headRefName: create.payload.workflow_run!.head_branch, headRepository,
+      } : null,
+    } };
     if (query.includes("query StatusFields")) return { node: { fields: { nodes: [{ id: "status", name: "Status", options: structuredClone(options) }], pageInfo: { hasNextPage: false } } } };
     if (query.includes("query StatusItemAudit")) return { node: { items: { nodes: structuredClone(items), pageInfo: { hasNextPage: false } } } };
     mutations.push({ query, variables });
@@ -71,7 +86,7 @@ function harness(initial = statuses()) {
     }
     throw new Error("Unexpected synthetic GraphQL operation");
   });
-  return { options: () => options, items, graphql, core, mutations, run: (context: Context) => syncProjectStatus({ github: { graphql }, core, context }) };
+  return { options: () => options, items, graphql, core, mutations, lifecycle, run: (context: Context) => syncProjectStatus({ github: { graphql }, core, context }) };
 }
 
 describe("project Status repair and transitions", () => {
@@ -120,13 +135,71 @@ describe("project Status repair and transitions", () => {
 
   it("transitions branch→review→done, handles reopen and avoids duplicate mutations", async () => {
     const state = harness();
-    for (const [event, expected] of [[create, "In Progress"], [pr("opened"), "In Review"], [pr("reopened"), "In Review"], [pr("closed", true), "Done"]] as const) {
+    for (const [event, pullState, expected] of [[create, null, "In Progress"], [pr("opened"), "OPEN", "In Review"], [pr("reopened"), "OPEN", "In Review"], [pr("closed", true), "MERGED", "Done"]] as const) {
+      state.lifecycle.pullState = pullState;
       await state.run(event);
       expect(state.items[0].fieldValueByName?.name).toBe(expected);
     }
     expect(state.core.setFailed).not.toHaveBeenCalled();
     expect(state.mutations).toHaveLength(3);
     expect(state.mutations.every((mutation) => mutation.query.includes("TransitionIssueStatus"))).toBe(true);
+  });
+
+  it("ignores a delayed branch signal and reruns after opening and merging the PR", async () => {
+    const state = harness();
+    state.lifecycle.pullState = "OPEN";
+    await state.run(pr("opened"));
+    await state.run(create);
+    expect(state.items[0].fieldValueByName?.name).toBe("In Review");
+
+    state.lifecycle.pullState = "MERGED";
+    await state.run(pr("closed", true));
+    await state.run(create);
+    await state.run(pr("opened"));
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
+    expect(state.mutations.map(({ variables }) => variables.optionId)).toEqual(["In Review", "Done"]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("skips stale events after the PR closes without a merge", async () => {
+    const state = harness();
+    state.lifecycle.pullState = "CLOSED";
+    await state.run(create);
+    await state.run(pr("opened"));
+    expect(state.mutations).toEqual([]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("skips branch and review events for closed issues but still records the merge", async () => {
+    const state = harness();
+    state.lifecycle.issueClosed = true;
+    await state.run(create);
+    state.lifecycle.pullState = "OPEN";
+    await state.run(pr("opened"));
+    expect(state.mutations).toEqual([]);
+
+    state.lifecycle.pullState = "MERGED";
+    await state.run(pr("closed", true));
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
+    expect(state.mutations).toHaveLength(1);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("skips a branch signal after the branch is deleted", async () => {
+    const state = harness();
+    state.lifecycle.branchExists = false;
+    await state.run(create);
+    expect(state.mutations).toEqual([]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("skips an old merge after the issue reopens", async () => {
+    const state = harness();
+    state.lifecycle.pullState = "MERGED";
+    state.lifecycle.reopenedAt = "2026-11-11T15:00:00Z";
+    await state.run(pr("closed", true));
+    expect(state.mutations).toEqual([]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
   });
 
   it.each([

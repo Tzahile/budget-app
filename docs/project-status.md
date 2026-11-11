@@ -42,6 +42,12 @@ Runs use one shared concurrency group with `queue: max` and
 and pending events are queued instead of replacing one another (GitHub's
 documented queue limit still applies). See
 [workflow concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+Before touching the Project, runs read the current issue and pull request
+lifecycle. A branch signal is skipped if the issue is closed, the branch was
+deleted, or a same-repository PR already exists for that branch. Review
+transitions require an open issue and PR. Done requires a merged PR whose
+merge did not precede the most recent reopening of the issue.
+This protects against delayed branch signals and reruns of older PR events.
 
 ## Project token setup
 

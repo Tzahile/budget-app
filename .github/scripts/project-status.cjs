@@ -43,9 +43,59 @@ function eventTransition(context) {
   if (context.eventName !== "pull_request_target") return null;
   const pr = context.payload.pull_request;
   if (pr?.head.repo?.full_name.toLowerCase() !== repository) return null;
-  if (["opened", "reopened"].includes(context.payload.action)) return { branch: pr.head.ref, status: "In Review" };
-  if (context.payload.action === "closed" && pr.merged) return { branch: pr.head.ref, status: "Done" };
+  if (["opened", "reopened"].includes(context.payload.action)) return { branch: pr.head.ref, status: "In Review", pullNumber: pr.number };
+  if (context.payload.action === "closed" && pr.merged) return { branch: pr.head.ref, status: "Done", pullNumber: pr.number };
   return null;
+}
+
+async function isCurrentTransition(graphql, number, { branch, status, pullNumber }) {
+  const repository = `${owner}/${repo}`.toLowerCase();
+  if (status !== "In Progress") {
+    if (!Number.isSafeInteger(pullNumber) || pullNumber < 1) throw new SyncFailure("Invalid pull request number");
+    const result = await graphql(`query StatusPullRequest($owner: String!, $repo: String!, $number: Int!, $pullNumber: Int!, $checkReopen: Boolean!) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) {
+          closed
+          timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) @include(if: $checkReopen) {
+            nodes { ... on ReopenedEvent { createdAt } }
+          }
+        }
+        pullRequest(number: $pullNumber) { state mergedAt headRefName headRepository { nameWithOwner } }
+      }
+    }`, { owner, repo, number, pullNumber, checkReopen: status === "Done" });
+    const { issue, pullRequest } = result.repository ?? {};
+    if (!issue) throw new SyncFailure("Linked issue was not found");
+    if (!pullRequest) throw new SyncFailure("Linked pull request was not found");
+    if (pullRequest.headRefName !== branch || pullRequest.headRepository?.nameWithOwner.toLowerCase() !== repository) return false;
+    if (status === "Done") {
+      const reopenedAt = issue.timelineItems?.nodes[0]?.createdAt;
+      return pullRequest.state === "MERGED" && (!reopenedAt || Date.parse(pullRequest.mergedAt) >= Date.parse(reopenedAt));
+    }
+    return !issue.closed && pullRequest.state === "OPEN";
+  }
+
+  let cursor = null;
+  do {
+    const result = await graphql(`query StatusBranch($owner: String!, $repo: String!, $number: Int!, $branch: String!, $ref: String!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        issue(number: $number) { closed }
+        ref(qualifiedName: $ref) { name }
+        pullRequests(first: 100, after: $cursor, headRefName: $branch, states: [OPEN, CLOSED, MERGED]) {
+          nodes { headRepository { nameWithOwner } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }`, { owner, repo, number, branch, ref: `refs/heads/${branch}`, cursor });
+    const { issue, ref, pullRequests } = result.repository ?? {};
+    if (!issue) throw new SyncFailure("Linked issue was not found");
+    if (issue.closed || !ref) return false;
+    if (!pullRequests) throw new SyncFailure("Could not check branch pull requests");
+    // A branch signal must never undo a PR transition, even if the PR has since closed.
+    if (pullRequests.nodes.some((pr) => pr.headRepository?.nameWithOwner.toLowerCase() === repository)) return false;
+    cursor = pullRequests.pageInfo.hasNextPage ? pullRequests.pageInfo.endCursor : null;
+    if (pullRequests.pageInfo.hasNextPage && !cursor) throw new SyncFailure("Incomplete branch pull request lookup");
+  } while (cursor);
+  return true;
 }
 
 async function snapshotItems(graphql, projectId, fieldName) {
@@ -90,6 +140,10 @@ async function syncProjectStatus({ github, context, core }) {
     const number = Number(match[1]);
     if (!Number.isSafeInteger(number) || number < 1) throw new SyncFailure("Invalid branch issue number");
     const graphql = github.graphql.bind(github);
+    if (!await isCurrentTransition(graphql, number, transition)) {
+      core.info(`Issue #${number}: stale ${transition.status} event; leaving project unchanged.`);
+      return;
+    }
 
     const projects = [];
     let cursor = null;
@@ -107,11 +161,6 @@ async function syncProjectStatus({ github, context, core }) {
     } while (cursor);
     if (projects.length !== 1) throw new SyncFailure("Expected exactly one matching BudgetApp project");
     const project = projects[0];
-
-    const issueResult = await graphql(`query StatusIssue($owner: String!, $repo: String!, $number: Int!) {
-      repository(owner: $owner, name: $repo) { issue(number: $number) { id } }
-    }`, { owner, repo, number });
-    if (!issueResult.repository?.issue) throw new SyncFailure("Linked issue was not found");
 
     const fieldsResult = await graphql(`query StatusFields($projectId: ID!) {
       node(id: $projectId) { ... on ProjectV2 { fields(first: 100) {
