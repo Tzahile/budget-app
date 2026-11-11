@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import ExcelJS from "exceljs";
-import { householdDate } from "../shared/finance.ts";
+import { householdDate, monthBounds } from "../shared/finance.ts";
 
 const date = householdDate();
 const euro = (cents: number) => new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" }).format(cents / 100);
@@ -181,6 +181,25 @@ test("reserve funding and current-month goal protect available funds without cha
   await overview(page, 100_000, 0, 100_000);
 });
 
+test("planned income increases projected cash and available funds without changing current cash", async ({ page }) => {
+  await account(page, "Synthetic current", "1000.00");
+  await overview(page, 100_000, 0);
+
+  await navigate(page, "Planned");
+  await page.getByRole("button", { name: "Add planned item" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Description", { exact: true }).fill("Synthetic planned income");
+  await dialog.getByRole("combobox", { name: "Type", exact: true }).selectOption("income");
+  await dialog.getByLabel("Amount").fill("250.00");
+  await dialog.getByLabel("Next due date").fill(monthBounds(date).end);
+  await dialog.getByRole("combobox", { name: "Repeats", exact: true }).selectOption("once");
+  await save(page);
+
+  await overview(page, 100_000, 0, 125_000);
+  await expect(page.getByText("Still coming in", { exact: true }).locator("..")).toContainText(euro(25_000));
+  await expect(page.getByText("Projected balance", { exact: true }).locator("..")).toContainText(euro(125_000));
+});
+
 test("CSV and XLSX imports share dedupe and reject an invalid preview without changing balances", async ({ page }) => {
   await account(page, "Synthetic current", "1000.00");
   await navigate(page, "Activity");
@@ -218,15 +237,20 @@ test("CSV and XLSX imports share dedupe and reject an invalid preview without ch
 });
 
 test("unauthenticated and unauthorized browser sessions cannot read finances or mutate", async ({ page, context }) => {
+  const createAccount = {
+    data: { name: "Synthetic forbidden", type: "cash", balanceCents: 1 },
+    headers: { Origin: "http://127.0.0.1:4180", "X-BudgetApp-Request": "1" },
+  };
   await context.clearCookies();
   await page.reload();
   await expect(page.getByRole("link", { name: "Log in with Val Town" })).toBeVisible();
   expect((await page.request.get("/api/data")).status()).toBe(401);
+  expect((await page.request.post("/api/accounts", createAccount)).status()).toBe(401);
   await context.addCookies([{ name: "budget_e2e_user", value: "synthetic-stranger", url: "http://127.0.0.1:4180" }]);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Account not authorized" })).toBeVisible();
   expect((await page.request.get("/api/data")).status()).toBe(403);
-  expect((await page.request.post("/api/accounts", { data: { name: "Synthetic forbidden", type: "cash", balanceCents: 1 }, headers: { Origin: "http://127.0.0.1:4180", "X-BudgetApp-Request": "1" } })).status()).toBe(403);
+  expect((await page.request.post("/api/accounts", createAccount)).status()).toBe(403);
   await noOverflow(page);
 });
 
