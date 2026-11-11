@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   sync:
+    environment: project-automation
     runs-on: ubuntu-latest
     steps:
       - name: Sync issue metadata into BudgetApp project

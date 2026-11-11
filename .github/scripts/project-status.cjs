@@ -33,13 +33,16 @@ function reconcileOptions(existing) {
 }
 
 function eventTransition(context) {
-  if (context.eventName === "create") {
-    if (context.payload.ref_type !== "branch") return null;
-    return { branch: context.payload.ref, status: "In Progress" };
+  const repository = `${owner}/${repo}`.toLowerCase();
+  if (context.eventName === "workflow_run") {
+    const run = context.payload.workflow_run;
+    if (run?.event !== "create" || run.conclusion !== "success" ||
+        run.head_repository?.full_name.toLowerCase() !== repository) return null;
+    return { branch: run.head_branch, status: "In Progress" };
   }
-  if (context.eventName !== "pull_request") return null;
+  if (context.eventName !== "pull_request_target") return null;
   const pr = context.payload.pull_request;
-  if (pr.head.repo.full_name.toLowerCase() !== `${owner}/${repo}`.toLowerCase()) return null;
+  if (pr?.head.repo?.full_name.toLowerCase() !== repository) return null;
   if (["opened", "reopened"].includes(context.payload.action)) return { branch: pr.head.ref, status: "In Review" };
   if (context.payload.action === "closed" && pr.merged) return { branch: pr.head.ref, status: "Done" };
   return null;

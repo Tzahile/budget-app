@@ -7,8 +7,8 @@ reading/updating Tzahile's Project. Tokens and raw GraphQL errors are never
 logged.
 
 Matching `issue-<number>-...` branches move their linked issue to **In Progress**.
-Same-repository PRs opened/reopened move it to **In Review**; merged PRs move it
-to **Done**. Closing a PR without merging leaves Status unchanged. Tags,
+Opening or reopening a same-repository PR moves it to **In Review**. Merging
+the PR moves it to **Done**. Closing a PR without merging leaves Status unchanged. Tags,
 unrelated branches and fork PRs make no Project reads or writes. The issue must
 already be in the Project; automation does not add items or select another
 Project silently.
@@ -40,11 +40,31 @@ the failure instead of making compensating writes to other items.
 Runs use one shared concurrency group with `queue: max` and
 `cancel-in-progress: false` so replacement-style field updates cannot overlap,
 and pending events are queued instead of replacing one another (GitHub's
-documented queue limit still applies). Same-repository PRs check out the immutable
-head SHA; branch-created runs check out the default branch so an older task
-branch need not contain the helper. Fork PRs never run checked-out code with
-the Project token. See
+documented queue limit still applies). See
 [workflow concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+
+## Project token setup
+
+1. In repository **Settings → Environments**, create `project-automation`.
+   Under deployment branches and tags, allow only the `main` branch and no tags.
+2. Store a rotated `PROJECT_TOKEN` as an environment secret and remove the old
+   repository-level secret during rollout. Check that an organization-level secret
+   of the same name is unavailable to this repository. Both Project status and
+   issue metadata automation use the environment secret.
+3. Verify that the repository's effective Actions event policy permits
+   `pull_request_target` for `.github/workflows/project-status.yml`. See
+   [GitHub's event policy documentation](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target#default-policy-for-pull_request_target).
+4. After rollout, confirm branch creation, PR open/reopen, PR merge, and issue
+   metadata sync on a disposable issue already in the Project.
+
+The unprivileged branch-creation workflow emits a completion signal. A
+`workflow_run` job uses GitHub's event metadata to identify the branch and
+does not consume artifacts or caches from that run. PR transitions use
+`pull_request_target` for same-repository PRs.
+Both events check out the default-branch commit identified by `github.sha`
+before loading the helper, including for PRs targeting another branch. Regular
+PR CI checks and tests proposed changes without the protected environment.
+Create new issue branches from a revision that contains the signal workflow.
 
 ## Verification and diagnostics
 

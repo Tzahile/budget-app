@@ -4,7 +4,20 @@ import { describe, expect, it, vi } from "vitest";
 
 type Option = { id?: string; name: string; color: string; description: string };
 type Item = { id: string; content?: { number: number; repository: { nameWithOwner: string; isPrivate: boolean } }; fieldValueByName: { optionId: string; name: string } | null };
-type Context = { eventName: string; payload: { ref_type?: string; ref?: string; action?: string; pull_request?: { merged: boolean; head: { ref: string; repo: { full_name: string } } } } };
+type WorkflowRun = {
+  event: string;
+  conclusion: string;
+  head_branch: string | null;
+  head_repository: { full_name: string } | null;
+};
+type Context = {
+  eventName: string;
+  payload: {
+    workflow_run?: WorkflowRun;
+    action?: string;
+    pull_request?: { merged: boolean; head: { ref: string; repo: { full_name: string } | null } };
+  };
+};
 type Dependencies = { github: { graphql: (query: string, variables?: Record<string, unknown>) => Promise<unknown> }; context: Context; core: { info: (message: string) => void; setFailed: (message: string) => void } };
 const { reconcileOptions, syncProjectStatus } = createRequire(import.meta.url)("../.github/scripts/project-status.cjs") as {
   reconcileOptions: (options: Option[]) => { options: Option[]; changed: boolean };
@@ -13,9 +26,21 @@ const { reconcileOptions, syncProjectStatus } = createRequire(import.meta.url)("
 
 const option = (name: string, id = name): Option => ({ id, name, color: "GRAY", description: `Synthetic ${id}` });
 const statuses = () => ["Backlog", "Ready", "In Progress", "In Review", "Done"].map((name) => option(name));
-const create: Context = { eventName: "create", payload: { ref_type: "branch", ref: "issue-62-project-status-repair" } };
+const branchCreated = (overrides: Partial<WorkflowRun> = {}): Context => ({
+  eventName: "workflow_run",
+  payload: {
+    workflow_run: {
+      event: "create",
+      conclusion: "success",
+      head_branch: "issue-62-project-status-repair",
+      head_repository: { full_name: "Tzahile/budget-app" },
+      ...overrides,
+    },
+  },
+});
+const create = branchCreated();
 const pr = (action: string, merged = false, full_name = "Tzahile/budget-app"): Context => ({
-  eventName: "pull_request", payload: { action, pull_request: { merged, head: { ref: "issue-62-project-status-repair", repo: { full_name } } } },
+  eventName: "pull_request_target", payload: { action, pull_request: { merged, head: { ref: "issue-62-project-status-repair", repo: { full_name } } } },
 });
 
 function harness(initial = statuses()) {
@@ -104,7 +129,16 @@ describe("project Status repair and transitions", () => {
     expect(state.mutations.every((mutation) => mutation.query.includes("TransitionIssueStatus"))).toBe(true);
   });
 
-  it.each([pr("closed"), pr("opened", false, "external/fork"), { eventName: "create", payload: { ref_type: "tag", ref: "issue-62" } }, { eventName: "create", payload: { ref_type: "branch", ref: "ordinary-branch" } }])("leaves ineligible events unchanged without GraphQL access", async (event) => {
+  it.each([
+    pr("closed"),
+    pr("opened", false, "external/fork"),
+    { ...pr("opened"), eventName: "pull_request" },
+    branchCreated({ event: "pull_request" }),
+    branchCreated({ conclusion: "skipped" }),
+    branchCreated({ head_repository: { full_name: "external/fork" } }),
+    branchCreated({ head_branch: null }),
+    branchCreated({ head_branch: "ordinary-branch" }),
+  ])("leaves ineligible events unchanged without GraphQL access", async (event) => {
     const state = harness();
     await state.run(event);
     expect(state.graphql).not.toHaveBeenCalled();
@@ -178,12 +212,24 @@ describe("project Status repair and transitions", () => {
     expect(state.items[1].fieldValueByName?.optionId).toBe("Ready");
   });
 
-  it("workflow uses the tested helper, queues every event, and excludes fork secret execution", () => {
+  it("keeps privileged automation on the trusted default branch and queues eligible events", () => {
     const workflow = readFileSync(new URL("../.github/workflows/project-status.yml", import.meta.url), "utf8");
     expect(workflow).toContain("queue: max");
     expect(workflow).toContain("cancel-in-progress: false");
     expect(workflow).toContain("github.event.pull_request.head.repo.full_name == github.repository");
-    expect(workflow).toContain("github.event.pull_request.head.sha || github.event.repository.default_branch");
+    expect(workflow).toMatch(/^ {2}pull_request_target:$/m);
+    expect(workflow).not.toMatch(/^ {2}(pull_request|create):/m);
+    expect(workflow).toContain("environment: project-automation");
+    expect(workflow).toContain("ref: ${{ github.sha }}");
+    expect(workflow).not.toContain(".head.sha");
+    expect(workflow).toContain("workflows: [Project branch created]");
+    const signal = readFileSync(new URL("../.github/workflows/project-branch-created.yml", import.meta.url), "utf8");
+    expect(signal).toContain("on: create");
+    expect(signal).toContain("github.event.ref_type == 'branch'");
+    expect(signal).toContain("permissions: {}");
+    expect(signal).not.toContain("secrets.");
+    const metadata = readFileSync(new URL("../.github/workflows/project-metadata-sync.yml", import.meta.url), "utf8");
+    expect(metadata).toContain("environment: project-automation");
     expect(workflow).toContain("require('./.github/scripts/project-status.cjs')");
     expect(workflow).toContain("await syncProjectStatus({ github, context, core })");
   });

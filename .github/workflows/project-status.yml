@@ -1,8 +1,11 @@
 name: Project status automation
 
 on:
-  create:
-  pull_request:
+  workflow_run:
+    workflows: [Project branch created]
+    types: [completed]
+    branches: ['issue-*']
+  pull_request_target:
     types: [opened, reopened, closed]
 
 permissions:
@@ -17,15 +20,19 @@ concurrency:
 jobs:
   update-project-status:
     if: >-
-      (github.event_name == 'create' && github.event.ref_type == 'branch') ||
-      (github.event_name == 'pull_request' &&
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'create' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'pull_request_target' &&
        github.event.pull_request.head.repo.full_name == github.repository)
+    environment: project-automation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          # Same-repository PRs only; forks never execute code with PROJECT_TOKEN.
-          ref: ${{ github.event.pull_request.head.sha || github.event.repository.default_branch }}
+          # Both triggers resolve github.sha from the trusted default branch.
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Repair canonical statuses and update linked issue
         uses: actions/github-script@v7

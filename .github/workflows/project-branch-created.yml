@@ -1,0 +1,12 @@
+name: Project branch created
+
+on: create
+
+permissions: {}
+
+jobs:
+  signal:
+    if: github.event.ref_type == 'branch' && startsWith(github.event.ref, 'issue-')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Issue branch created"
