@@ -38,6 +38,11 @@ remaining Open Banking and React Native work.
 
 ## Local checks and PR validation
 
+Browser regressions use the actual app and API with an isolated synthetic
+SQLite harness: `npm run test:e2e`. See
+[`docs/browser-tests.md`](docs/browser-tests.md) for browser setup, desktop/phone
+coverage, and the deferred Open Banking sync scenario.
+
 During implementation, run focused checks for the files and behaviors you change;
 for example, `npx vitest run tests/<relevant-test>.test.ts` or
 `npx eslint <changed-file>`. Use broader local checks only when investigating a
