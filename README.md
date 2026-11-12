@@ -38,6 +38,10 @@ remaining Open Banking and React Native work.
 
 ## Local checks and PR validation
 
+Project Status automation repairs canonical options without clearing existing
+values; see [`docs/project-status.md`](docs/project-status.md) for transition
+rules, preservation checks and safe audit logs.
+
 During implementation, run focused checks for the files and behaviors you change;
 for example, `npx vitest run tests/<relevant-test>.test.ts` or
 `npx eslint <changed-file>`. Use broader local checks only when investigating a
