@@ -154,6 +154,15 @@ describe("ingestion denominations", () => {
     expect(insert).toMatchObject({ args: expect.arrayContaining(["USD"]) });
   });
 
+
+  it("fails closed if a mapping bypasses a recognized currency header or two aliases are present", () => {
+    const mapping = { date: "Date", amount: "Amount", description: "Description", currency: "Alternative" };
+    expect(() => parseCsvTransactions("Date,Amount,Description,Currency,Alternative\n2026-09-16,-2.00,Synthetic,USD,EUR\n", mapping))
+      .toThrow("Map the Currency or Valuta column");
+    expect(() => parseCsvTransactions("Date,Amount,Description,Currency,Valuta\n2026-09-16,-2.00,Synthetic,USD,EUR\n", { ...mapping, currency: "Valuta" }))
+      .toThrow("Use only one Currency or Valuta column");
+  });
+
   it("rejects malformed mapped currency without retaining source text in row errors", () => {
     const result = parseCsvTransactions("Date,Amount,Description,Currency\n2026-09-16,2.00,Synthetic,SECRET_INVALID\n", { date: "Date", amount: "Amount", description: "Description", currency: "Currency" });
     expect(result.transactions).toEqual([]);

@@ -34,7 +34,7 @@ import {
   deleteTransfer,
   decideIngestedTransferCandidate,
 } from "./server/repository.ts";
-import { csvHeaders, parseCsvTransactions, type CsvColumnMapping } from "./server/ingestion.ts";
+import { csvHeaders, parseCsvTransactions, tabularRowsForEurImport, type CsvColumnMapping, type CsvParseResult } from "./server/ingestion.ts";
 import { readXlsxWorkbook, parseXlsxSheet } from "./server/xlsx.ts";
 import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile } from "./server/csv-profiles.ts";
 import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
@@ -191,7 +191,7 @@ app.post("/api/imports/csv/preview", async (c) => {
   const csv = exactStringField(body, "csv", 500_000);
   const headers = csvHeaders(csv);
   if (!body.mapping) return c.json({ headers });
-  const parsed = parseCsvTransactions(csv, csvMapping(body.mapping));
+  const parsed = parseCsvImport(csv, csvMapping(body.mapping));
   return c.json({ headers, rowCount: parsed.transactions.length + parsed.rowErrors.length, validCount: parsed.transactions.length, sample: parsed.transactions.slice(0, 5), unsupportedCurrencyCount: parsed.transactions.filter((row) => row.currency !== undefined && row.currency !== DEFAULT_CURRENCY).length, rowErrors: parsed.rowErrors });
 });
 
@@ -229,30 +229,9 @@ app.post("/api/imports/csv", async (c) => {
   const accountId = safeId(stringField(body, "accountId", 64));
   const csv = exactStringField(body, "csv", 500_000);
   const mapping = csvMapping(body.mapping);
-  const parsed = parseCsvTransactions(csv, mapping);
-  const filename = stringField(body, "filename", 160);
-  const retryKey = optionalString(body, "retryKey", 200);
-  if (parsed.errors.length) {
-    try {
-      await ingestTransactions({
-        accountId, filename, source: "csv", transactions: parsed.transactions,
-        rowErrors: parsed.rowErrors, retryKey,
-      });
-    } catch (error) {
-      if (Number((error as Error & { status?: number }).status) === 422) {
-        return c.json({
-          ok: false,
-          importId: String((error as Error & { importId?: string }).importId ?? ""),
-          errors: parsed.errors,
-        }, 422);
-      }
-      throw error;
-    }
-  }
-  const result = await ingestTransactions({
-    accountId, filename, source: "csv", transactions: parsed.transactions, retryKey,
-  });
-  return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+  const parsed = parseCsvImport(csv, mapping);
+  const result = await commitTabularImport("csv", body, accountId, parsed);
+  return c.json(result.body, result.status);
 });
 
 app.post("/api/imports/xlsx", async (c) => {
@@ -264,20 +243,8 @@ app.post("/api/imports/xlsx", async (c) => {
   let parsed;
   try { parsed = parseXlsxSheet(workbook, sheet, mapping); }
   catch (error) { throw new ValidationError(error instanceof Error ? error.message : "XLSX mapping is invalid"); }
-  const filename = stringField(body, "filename", 160);
-  const retryKey = optionalString(body, "retryKey", 200);
-  if (parsed.errors.length) {
-    try {
-      await ingestTransactions({ accountId, filename, source: "xlsx", transactions: parsed.transactions, rowErrors: parsed.rowErrors, retryKey });
-    } catch (error) {
-      if (Number((error as Error & { status?: number }).status) === 422) {
-        return c.json({ ok: false, importId: String((error as Error & { importId?: string }).importId ?? ""), errors: parsed.errors }, 422);
-      }
-      throw error;
-    }
-  }
-  const result = await ingestTransactions({ accountId, filename, source: "xlsx", transactions: parsed.transactions, retryKey });
-  return c.json({ ok: true, ...result, rowCount: parsed.transactions.length }, 201);
+  const result = await commitTabularImport("xlsx", body, accountId, parsed);
+  return c.json(result.body, result.status);
 });
 
 app.get("/api/imports", async (c) => {
@@ -426,6 +393,25 @@ function csvMapping(value: unknown): CsvColumnMapping {
     dateFormat: mapping.dateFormat == null ? undefined : enumField(mapping, "dateFormat", ["iso", "day_first", "month_first"] as const),
     decimalSeparator: mapping.decimalSeparator == null ? undefined : enumField(mapping, "decimalSeparator", [",", "."] as const),
   };
+}
+
+function parseCsvImport(csv: string, mapping: CsvColumnMapping): CsvParseResult {
+  try { return parseCsvTransactions(csv, mapping); }
+  catch (error) { throw new ValidationError(error instanceof Error ? error.message : "CSV mapping is invalid"); }
+}
+
+async function commitTabularImport(source: "csv" | "xlsx", body: Record<string, unknown>, accountId: string, parsed: CsvParseResult) {
+  const { transactions, rowErrors, errors } = tabularRowsForEurImport(parsed);
+  const filename = stringField(body, "filename", 160);
+  const retryKey = optionalString(body, "retryKey", 200);
+  try {
+    const result = await ingestTransactions({ accountId, filename, source, transactions, rowErrors, retryKey });
+    return { body: { ok: true, ...result, rowCount: transactions.length }, status: 201 as const };
+  } catch (error) {
+    const rejected = error as Error & { status?: number; importId?: string };
+    if (rejected.status !== 422 || !rejected.importId || !errors.length) throw error;
+    return { body: { ok: false, importId: rejected.importId, errors }, status: 422 as const };
+  }
 }
 
 async function xlsxWorkbook(body: Record<string, unknown>) {

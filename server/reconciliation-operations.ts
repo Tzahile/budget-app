@@ -1,3 +1,5 @@
+import { DEFAULT_CURRENCY } from "../shared/currency.ts";
+
 export interface SqlStatement {
   sql: string;
   args: (string | number | null)[];
@@ -18,7 +20,7 @@ export function reconcileAccountStatements(input: {
           difference_cents, note, created_at)
         SELECT ?, id, ?, balance_cents, ?, ? - balance_cents, ?, ?
         FROM accounts
-        WHERE id = ? AND is_active = 1`,
+        WHERE id = ? AND is_active = 1 AND currency = ?`,
       args: [
         input.reconciliationId,
         input.date,
@@ -27,12 +29,13 @@ export function reconcileAccountStatements(input: {
         input.note,
         input.now,
         input.accountId,
+        DEFAULT_CURRENCY,
       ],
     },
     {
       sql: `UPDATE accounts
         SET balance_cents = ?, updated_at = ?, is_demo = 0
-        WHERE id = ? AND is_active = 1
+        WHERE id = ? AND is_active = 1 AND currency = ?
           AND EXISTS (
             SELECT 1 FROM account_reconciliations
             WHERE id = ? AND account_id = accounts.id
@@ -42,6 +45,7 @@ export function reconcileAccountStatements(input: {
         input.actualBalanceCents,
         input.now,
         input.accountId,
+        DEFAULT_CURRENCY,
         input.reconciliationId,
       ],
     },

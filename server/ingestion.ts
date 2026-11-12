@@ -40,7 +40,7 @@ export interface CsvParseResult {
 
 export interface IngestionRowError {
   sourcePosition: number;
-  code: "invalid_date" | "invalid_amount" | "invalid_description" | "external_id_too_long" | "invalid_status" | "invalid_currency" | "invalid_row";
+  code: "invalid_date" | "invalid_amount" | "invalid_description" | "external_id_too_long" | "invalid_status" | "invalid_currency" | "unsupported_currency" | "invalid_row";
   /** Bounded, allow-listed summary that cannot include source financial data. */
   summary: string;
 }
@@ -120,7 +120,12 @@ export function parseTabularTransactions(rows: string[][], mapping: CsvColumnMap
   const descriptionIndex = indexFor(mapping.description, true);
   const externalIdIndex = mapping.externalId ? indexFor(mapping.externalId, true) : -1;
   const statusIndex = mapping.status ? indexFor(mapping.status, true) : -1;
-  const currencyIndex = mapping.currency ? indexFor(mapping.currency, true) : -1;
+  const recognizedCurrencyIndexes = headers.flatMap((header, index) => header === "currency" || header === "valuta" ? [index] : []);
+  if (recognizedCurrencyIndexes.length > 1) throw new Error("Use only one Currency or Valuta column");
+  const currencyIndex = mapping.currency ? indexFor(mapping.currency, true) : recognizedCurrencyIndexes[0] ?? -1;
+  if (recognizedCurrencyIndexes.length && !recognizedCurrencyIndexes.includes(currencyIndex)) {
+    throw new Error("Map the Currency or Valuta column");
+  }
   if (new Set([dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex, currencyIndex].filter((index) => index >= 0)).size !== [dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex, currencyIndex].filter((index) => index >= 0).length) throw new Error("Each mapped column must be distinct");
   if (mapping.dateFormat && !["iso", "day_first", "month_first"].includes(mapping.dateFormat)) throw new Error("date format is invalid");
   if (mapping.decimalSeparator && mapping.decimalSeparator !== "," && mapping.decimalSeparator !== ".") throw new Error("decimal separator is invalid");
@@ -156,6 +161,25 @@ export function parseTabularTransactions(rows: string[][], mapping: CsvColumnMap
     }
   });
   return { transactions, errors, rowErrors };
+}
+
+/** Convert unsupported tabular rows to durable audit errors before canonical preparation. */
+export function tabularRowsForEurImport(parsed: CsvParseResult): CsvParseResult {
+  const transactions: CanonicalTransactionInput[] = [];
+  const rowErrors = [...parsed.rowErrors];
+  const errors = [...parsed.errors];
+  for (const [index, transaction] of parsed.transactions.entries()) {
+    if (transaction.currency === undefined || transaction.currency === DEFAULT_CURRENCY) {
+      transactions.push(transaction);
+      continue;
+    }
+    const position = sourcePosition(transaction, index);
+    const code = "unsupported_currency";
+    const summary = safeRowErrorSummary(code);
+    rowErrors.push({ sourcePosition: position, code, summary });
+    errors.push(`Row ${position}: ${summary}`);
+  }
+  return { transactions, rowErrors, errors };
 }
 
 export function csvHeaders(csv: string): string[] {
@@ -347,6 +371,7 @@ function safeRowErrorSummary(code: IngestionRowError["code"]): string {
     external_id_too_long: "External ID is too long",
     invalid_status: "Status is invalid",
     invalid_currency: "Currency is invalid",
+    unsupported_currency: "Only EUR is supported; currency conversion is unavailable",
     invalid_row: "Row is invalid",
   };
   return summaries[code] ?? summaries.invalid_row;
