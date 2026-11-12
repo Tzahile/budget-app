@@ -279,6 +279,37 @@ export const migrations: readonly Migration[] = [
     ],
   },
   { version: 13, name: "currency denomination guards", statements: currencyGuards },
+  {
+    // Versions 14 and 15 are reserved for Open Banking in PR #52.
+    version: 16,
+    name: "optional Android notification ingestion",
+    statements: [
+      "CREATE TABLE migration_import_sources AS SELECT id, source FROM imports",
+      "DROP INDEX imports_retry_key_idx",
+      "ALTER TABLE imports DROP COLUMN source",
+      "ALTER TABLE imports ADD COLUMN source TEXT NOT NULL DEFAULT 'csv' CHECK (source IN ('csv', 'xlsx', 'open_banking', 'android_notification'))",
+      "UPDATE imports SET source = (SELECT source FROM migration_import_sources WHERE migration_import_sources.id = imports.id)",
+      "DROP TABLE migration_import_sources",
+      "CREATE UNIQUE INDEX imports_retry_key_idx ON imports(source, account_id, retry_key) WHERE retry_key IS NOT NULL",
+      "ALTER TABLE imports ADD COLUMN request_fingerprint TEXT",
+      "CREATE UNIQUE INDEX notification_delivery_retry_idx ON imports(retry_key) WHERE source = 'android_notification' AND retry_key IS NOT NULL",
+      `CREATE TRIGGER notification_import_active_account BEFORE INSERT ON imports
+        WHEN NEW.source = 'android_notification' AND NOT EXISTS (
+          SELECT 1 FROM accounts WHERE id = NEW.account_id AND is_active = 1)
+        BEGIN SELECT RAISE(ABORT, 'Android notification requires an active account'); END`,
+      // The application reports ambiguity first; this guard closes concurrent
+      // cross-adapter races within the canonical ingestion transaction.
+      `CREATE TRIGGER notification_import_overlap BEFORE INSERT ON transactions
+        WHEN NEW.source = 'import' AND EXISTS (
+          SELECT 1 FROM transactions t WHERE t.account_id = NEW.account_id
+            AND t.source = 'import' AND t.voided_at IS NULL
+            AND t.amount_cents = NEW.amount_cents
+            AND ABS(julianday(t.date) - julianday(NEW.date)) <= 3
+            AND (json_extract(NEW.raw_metadata, '$.adapter') = 'android_notification'
+              OR json_extract(t.raw_metadata, '$.adapter') = 'android_notification'))
+        BEGIN SELECT RAISE(ABORT, 'Possible notification overlap; reconcile before importing'); END`,
+    ],
+  },
 ];
 
 export async function migrateDatabase(

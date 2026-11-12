@@ -39,3 +39,20 @@ New codes must use three uppercase letters. Denomination changes are rejected;
 linked transactions, plans and reserves must use the same currency as their
 account or obligation. Existing unsupported data remains exportable, and the
 calculation/view boundaries reject it rather than combining or relabeling it.
+
+## Version 16: optional Android notification source
+
+Versions 14 and 15 are reserved for Open Banking. The migration runner checks
+each version individually, so this feature can deploy while those versions are
+pending. When both land, retain the reviewed Open Banking backup projections
+and format version with schema version 16.
+
+Preserves every existing import source while extending its constraint with
+`android_notification`. Adds a private request fingerprint and a partial unique
+index for notification delivery IDs across the household. Notification IDs
+identify delivery retries, never bank transactions. An import insert trigger
+requires an active account for new notification runs. A transaction insert trigger
+rejects possible notification/statement overlaps (same account and signed amount
+within three calendar days) within the atomic ingestion batch. It does not alter
+existing transactions or balances. Export projections were reviewed at schema 16;
+request fingerprints and delivery retry keys remain excluded.

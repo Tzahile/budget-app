@@ -24,6 +24,7 @@ available to spend.
 - CSV/XLSX import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
 - explicit review of detected owned-account transfers from imported transactions
 - authenticated versioned JSON backup download of canonical and audit data
+- disabled-by-default, authenticated Android notification ingestion API foundation with explicit confirmation and conservative overlap rejection (no native listener yet)
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
 
@@ -104,3 +105,13 @@ Initial setup:
 
 Never edit production code only in the Val Town web editor: the next GitHub
 deployment intentionally overwrites it.
+
+## Optional Android notification adapter
+
+The current web backend accepts **normalized, reviewed facts**, not Android
+notification text. This is an API foundation for a later device client; there is
+no native notification listener, parser, background upload, new device credential,
+or onboarding UI. See [`docs/android-notifications.md`](docs/android-notifications.md)
+for the contract, independent enable/disable switch, confirmation requirements,
+privacy and conservative duplicate policy. It is disabled by default and does not
+replace the regulated Open Banking objective or its verification gate.
