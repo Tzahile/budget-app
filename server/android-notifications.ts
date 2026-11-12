@@ -83,7 +83,6 @@ export function createAndroidNotificationRoutes(enabled: () => boolean) {
       throw new ValidationError("Explicit confirmation of the reviewed event is required");
     }
     const event = parseAndroidNotification(body.event);
-    await validateAccount(event);
     const result = await ingestTransactions({
       accountId: event.accountId, source: "android_notification", filename: "Android notification",
       retryKey: event.eventId, retryFingerprint: await fingerprint(event),

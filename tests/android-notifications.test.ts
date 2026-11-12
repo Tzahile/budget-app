@@ -1,9 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseAndroidNotification, normalizeAndroidNotification } from "../server/android-notifications.ts";
 import { createAccount, getAppData, ingestTransactions, listTransactions } from "../server/repository.ts";
 import { exportBackup } from "../server/backup.ts";
-import { useTestSqlite } from "./support/val-sqlite.ts";
+import { sqlite, useTestSqlite } from "./support/val-sqlite.ts";
 
 let database: DatabaseSync;
 let handler: (request: Request) => Response | Promise<Response>;
@@ -102,6 +102,58 @@ describe("optional reviewed Android notification adapter", () => {
     expect(responses.map((response) => response.status).sort()).toEqual([200, 201]);
     expect(balance(source.accountId)).toBe(98_766);
     expect(database.prepare("SELECT COUNT(*) AS count FROM transactions WHERE account_id = ?").get(source.accountId)).toMatchObject({ count: 1 });
+  });
+
+  it("replays a committed delivery after its account is archived without accepting new writes", async () => {
+    const id = await newAccount();
+    const source = event(id);
+    const confirmed = await request("confirm", { event: source, confirmed: true });
+    expect(confirmed.status).toBe(201);
+    const { importId } = await confirmed.json();
+    database.prepare("UPDATE accounts SET is_active = 0 WHERE id = ?").run(id);
+
+    const replay = await request("confirm", { event: source, confirmed: true });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ importId, importedCount: 1, replayed: true });
+    expect((await request("confirm", { event: { ...source, amountCents: -5678 }, confirmed: true })).status).toBe(409);
+    expect((await request("confirm", { event: event(id, { amountCents: -5678 }), confirmed: true })).status).toBe(400);
+    expect(balance(id)).toBe(98_766);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM imports WHERE account_id = ?").get(id)).toMatchObject({ count: 1 });
+  });
+
+  it("rolls back an otherwise valid delivery if the account is archived immediately before the write batch", async () => {
+    const id = await newAccount();
+    const source = event(id);
+    const batch = sqlite.batch;
+    const archiveBeforeWrite = vi.spyOn(sqlite, "batch").mockImplementationOnce(async (statements) => {
+      database.prepare("UPDATE accounts SET is_active = 0 WHERE id = ?").run(id);
+      await batch(statements);
+    });
+    try {
+      const result = await request("confirm", { event: source, confirmed: true });
+      expect(result.status).toBe(400);
+      expect(await result.json()).toMatchObject({ error: "Choose an active account" });
+      expect(archiveBeforeWrite).toHaveBeenCalledOnce();
+      expect(balance(id)).toBe(100_000);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM imports WHERE account_id = ?").get(id)).toMatchObject({ count: 0 });
+      expect(database.prepare("SELECT COUNT(*) AS count FROM transactions WHERE account_id = ?").get(id)).toMatchObject({ count: 0 });
+    } finally {
+      archiveBeforeWrite.mockRestore();
+    }
+  });
+
+  it("does not propose an Android refund as an incoming transfer leg", async () => {
+    const refundAccount = await newAccount();
+    const otherAccount = await newAccount();
+    const amountCents = 24_681;
+    await ingestTransactions({
+      accountId: otherAccount, source: "csv", filename: "synthetic.csv",
+      transactions: [{ occurredOn: "2026-10-30", amountCents: -amountCents, description: "Synthetic expense" }],
+    });
+    expect((await request("confirm", { event: event(refundAccount, { amountCents, kind: "refund" }), confirmed: true })).status).toBe(201);
+    expect(balance(refundAccount)).toBe(124_681);
+    expect(database.prepare(`SELECT COUNT(*) AS count FROM ingested_transfer_candidates c
+      JOIN transactions t ON t.id = c.incoming_transaction_id WHERE t.account_id = ?`).get(refundAccount)).toMatchObject({ count: 0 });
   });
 
   it("blocks possible cross-source duplicates in both directions despite different descriptions and bank IDs", async () => {

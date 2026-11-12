@@ -45,6 +45,7 @@ import {
   type TransferDetectionTransaction,
 } from "./ingested-transfers.ts";
 import { nextTransactionCursor, transactionPageQuery, type TransactionFilters, type TransactionPage } from "./transaction-search.ts";
+import { ValidationError } from "./validation.ts";
 
 type Row = Record<string, unknown>;
 
@@ -272,6 +273,7 @@ export async function ingestTransactions(input: {
     throw Object.assign(new Error("No transactions or row errors to record"), { status: 400 });
   }
   const account = await one("SELECT currency FROM accounts WHERE id = ?", [input.accountId]);
+  if (!account && input.source === "android_notification") throw new ValidationError("Choose an active account");
   if (!account) throw notFound("Account");
   assertSupportedCurrency(account.currency);
   const prepared = await prepareCanonicalTransactions({
@@ -341,7 +343,8 @@ export async function ingestTransactions(input: {
     WHERE source = 'import' AND status = 'cleared' AND kind IN ('income', 'expense')
       AND voided_at IS NULL AND transfer_group_id IS NULL`);
   const acceptedForDetection: TransferDetectionTransaction[] = assessments
-    .filter((assessment) => assessment.decision === "accepted" && assessment.transaction.status !== "pending")
+    .filter(({ decision, transaction }) => decision === "accepted" && transaction.status === "cleared" &&
+      (transaction.kind === "income" || transaction.kind === "expense"))
     .map(({ transaction }) => ({
       id: transaction.id,
       accountId: input.accountId,
@@ -400,9 +403,11 @@ async function writeIngestionPlan(
     await db.batch(statements);
     return null;
   } catch (error) {
+    const inactiveNotificationAccount = input.source === "android_notification" &&
+      error instanceof Error && error.message.includes("Android notification requires an active account");
     // Two requests with the same explicit retry key can race. The unique index
-    // rolls back the losing batch, so returning the committed run is safe.
-    if (retryKey && error instanceof Error && /constraint|unique/i.test(error.message)) {
+    // or account guard rolls back the losing batch before a replay is returned.
+    if (retryKey && (inactiveNotificationAccount || error instanceof Error && /constraint|unique/i.test(error.message))) {
       const previous = await one(
         "SELECT * FROM imports WHERE source = ? AND (account_id = ? OR source = 'android_notification') AND retry_key = ?",
         [input.source, input.accountId, retryKey],
@@ -412,6 +417,7 @@ async function writeIngestionPlan(
         return replayIngestion(previous);
       }
     }
+    if (inactiveNotificationAccount) throw new ValidationError("Choose an active account");
     if (error instanceof Error && error.message.includes("Possible notification overlap")) {
       throw conflict("Possible notification overlap; reconcile before importing");
     }

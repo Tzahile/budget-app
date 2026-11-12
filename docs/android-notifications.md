@@ -60,7 +60,8 @@ Notifications may represent authorizations, pending payments, reversals or parti
 information. The user must verify the settled amount, date and kind. Confirmation
 creates **one cleared transaction** and changes the chosen account's balance. It
 must not be used to import unverified pending authorizations. The adapter cannot
-infer transfers; existing transfer-review workflows apply to confirmed imports.
+infer transfers; existing transfer-review workflows apply to cleared income and
+expense imports. Refunds are excluded from transfer detection.
 
 ## Canonical ingestion and duplicate policy
 
@@ -70,7 +71,9 @@ same transactional canonical pipeline as CSV/XLSX and bank integrations. Import
 history and Activity filters label the source `android_notification`.
 
 The delivery UUID is a retry key, never canonical `externalId`. Exact successful
-retries return the existing run with no second balance mutation. The UUID is unique
+retries return the existing run with no second balance mutation, even after the
+account is archived. A new delivery requires an active account at commit time.
+The UUID is unique
 across local accounts; changing reviewed data or moving the same delivery to another
 account returns a conflict. A private SHA-256 fingerprint binds all normalized
 reviewed fields to that delivery ID, including failed import attempts. Corrections
