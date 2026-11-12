@@ -80,7 +80,7 @@ async function isCurrentTransition(graphql, number, { branch, status, pullNumber
       repository(owner: $owner, name: $repo) {
         issue(number: $number) { closed }
         ref(qualifiedName: $ref) { name }
-        pullRequests(first: 100, after: $cursor, headRefName: $branch, states: [OPEN, CLOSED, MERGED]) {
+        pullRequests(first: 100, after: $cursor, headRefName: $branch, states: [OPEN, MERGED]) {
           nodes { headRepository { nameWithOwner } }
           pageInfo { hasNextPage endCursor }
         }
@@ -90,7 +90,6 @@ async function isCurrentTransition(graphql, number, { branch, status, pullNumber
     if (!issue) throw new SyncFailure("Linked issue was not found");
     if (issue.closed || !ref) return false;
     if (!pullRequests) throw new SyncFailure("Could not check branch pull requests");
-    // A branch signal must never undo a PR transition, even if the PR has since closed.
     if (pullRequests.nodes.some((pr) => pr.headRepository?.nameWithOwner.toLowerCase() === repository)) return false;
     cursor = pullRequests.pageInfo.hasNextPage ? pullRequests.pageInfo.endCursor : null;
     if (pullRequests.pageInfo.hasNextPage && !cursor) throw new SyncFailure("Incomplete branch pull request lookup");
@@ -179,6 +178,14 @@ async function syncProjectStatus({ github, context, core }) {
     if (linked.length !== 1) throw new SyncFailure("Linked issue must have exactly one project item");
     auditLog(core, "Before", field.options, before);
     const repair = reconcileOptions(field.options);
+    const item = linked[0];
+    const selectedOption = repair.options.find(({ id }) => id && id === item.fieldValueByName?.optionId);
+    const currentRank = canonical.findIndex(({ name }) => name === selectedOption?.name);
+    const targetRank = canonical.findIndex(({ name }) => name === transition.status);
+    if (currentRank > targetRank) {
+      core.info(`Issue #${number}: already ${selectedOption.name}; ignoring earlier ${transition.status} event.`);
+      return;
+    }
     let options = field.options;
     if (repair.changed) {
       const updated = await graphql(`mutation RepairStatusOptions($fieldId: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]!) {
@@ -205,7 +212,6 @@ async function syncProjectStatus({ github, context, core }) {
     }
     for (const status of canonical) if (options.filter((option) => option.name === status.name).length !== 1) throw new SyncFailure("Canonical Status repair is incomplete");
     const option = options.find((option) => option.name === transition.status);
-    const item = linked[0];
     if (item.fieldValueByName?.optionId === option.id) {
       auditLog(core, "After", options, await snapshotItems(graphql, project.id, field.name));
       core.info(`Issue #${number}: already ${transition.status}; no status mutation needed.`); return;

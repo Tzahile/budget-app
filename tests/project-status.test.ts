@@ -26,26 +26,28 @@ const { reconcileOptions, syncProjectStatus } = createRequire(import.meta.url)("
 
 const option = (name: string, id = name): Option => ({ id, name, color: "GRAY", description: `Synthetic ${id}` });
 const statuses = () => ["Backlog", "Ready", "In Progress", "In Review", "Done"].map((name) => option(name));
+const issueBranch = "issue-62-project-status-repair";
+const alternateBranch = "issue-62-alternate-work";
 const branchCreated = (overrides: Partial<WorkflowRun> = {}): Context => ({
   eventName: "workflow_run",
   payload: {
     workflow_run: {
       event: "create",
       conclusion: "success",
-      head_branch: "issue-62-project-status-repair",
+      head_branch: issueBranch,
       head_repository: { full_name: "Tzahile/budget-app" },
       ...overrides,
     },
   },
 });
 const create = branchCreated();
-const pr = (action: string, merged = false, full_name = "Tzahile/budget-app"): Context => ({
-  eventName: "pull_request_target", payload: { action, pull_request: { number: 68, merged, head: { ref: "issue-62-project-status-repair", repo: { full_name } } } },
+const pr = (action: string, merged = false, full_name = "Tzahile/budget-app", branch = issueBranch): Context => ({
+  eventName: "pull_request_target", payload: { action, pull_request: { number: 68, merged, head: { ref: branch, repo: { full_name } } } },
 });
 
 function harness(initial = statuses()) {
   const lifecycle = {
-    issueClosed: false, branchExists: true, pullState: null as "OPEN" | "CLOSED" | "MERGED" | null,
+    issueClosed: false, branchExists: true, pullState: null as "OPEN" | "CLOSED" | "MERGED" | null, pullBranch: issueBranch,
     mergedAt: "2026-11-11T14:00:00Z", reopenedAt: null as string | null,
   };
   const headRepository = { nameWithOwner: "Tzahile/budget-app" };
@@ -59,15 +61,19 @@ function harness(initial = statuses()) {
   const core = { info: vi.fn<(message: string) => void>(), setFailed: vi.fn<(message: string) => void>() };
   const graphql = vi.fn<Dependencies["github"]["graphql"]>(async (query, variables = {}) => {
     if (query.includes("query StatusProjects")) return { user: { projectsV2: { nodes: [{ id: "project", title: "@Tzahile's budgetApp project" }], pageInfo: { hasNextPage: false } } } };
-    if (query.includes("query StatusBranch")) return { repository: {
-      issue: { closed: lifecycle.issueClosed },
-      ref: lifecycle.branchExists ? { name: variables.branch } : null,
-      pullRequests: { nodes: lifecycle.pullState ? [{ headRepository }] : [], pageInfo: { hasNextPage: false } },
-    } };
+    if (query.includes("query StatusBranch")) {
+      const requestedStates = query.match(/states: \[([^\]]+)\]/)?.[1].split(", ");
+      const matchingPull = lifecycle.pullState && variables.branch === lifecycle.pullBranch && requestedStates?.includes(lifecycle.pullState);
+      return { repository: {
+        issue: { closed: lifecycle.issueClosed },
+        ref: lifecycle.branchExists ? { name: variables.branch } : null,
+        pullRequests: { nodes: matchingPull ? [{ headRepository }] : [], pageInfo: { hasNextPage: false } },
+      } };
+    }
     if (query.includes("query StatusPullRequest")) return { repository: {
       issue: { closed: lifecycle.issueClosed, timelineItems: { nodes: lifecycle.reopenedAt ? [{ createdAt: lifecycle.reopenedAt }] : [] } },
       pullRequest: lifecycle.pullState ? {
-        state: lifecycle.pullState, mergedAt: lifecycle.mergedAt, headRefName: create.payload.workflow_run!.head_branch, headRepository,
+        state: lifecycle.pullState, mergedAt: lifecycle.mergedAt, headRefName: lifecycle.pullBranch, headRepository,
       } : null,
     } };
     if (query.includes("query StatusFields")) return { node: { fields: { nodes: [{ id: "status", name: "Status", options: structuredClone(options) }], pageInfo: { hasNextPage: false } } } };
@@ -161,11 +167,61 @@ describe("project Status repair and transitions", () => {
     expect(state.core.setFailed).not.toHaveBeenCalled();
   });
 
-  it("skips stale events after the PR closes without a merge", async () => {
+  it.each(["OPEN", "MERGED"] as const)("waits for the PR transition when the branch already has a %s PR", async (pullState) => {
     const state = harness();
+    state.lifecycle.pullState = pullState;
+    await state.run(create);
+    expect(state.items[0].fieldValueByName?.name).toBe("Ready");
+    expect(state.mutations).toEqual([]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it.each(["Ready", "Backlog"])("advances %s when the live branch's only PR closed without merging", async (initialStatus) => {
+    const state = harness();
+    state.items[0].fieldValueByName = { optionId: initialStatus, name: initialStatus };
     state.lifecycle.pullState = "CLOSED";
     await state.run(create);
     await state.run(pr("opened"));
+    expect(state.items[0].fieldValueByName?.name).toBe("In Progress");
+    expect(state.mutations.map(({ variables }) => variables.optionId)).toEqual(["In Progress"]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("preserves In Review after the branch's PR closes without merging", async () => {
+    const state = harness();
+    state.lifecycle.pullState = "OPEN";
+    await state.run(pr("opened"));
+    state.lifecycle.pullState = "CLOSED";
+    await state.run(create);
+    expect(state.items[0].fieldValueByName?.name).toBe("In Review");
+    expect(state.mutations.map(({ variables }) => variables.optionId)).toEqual(["In Review"]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("preserves In Review and Done when events arrive for another branch of the same issue", async () => {
+    const state = harness();
+    state.lifecycle.pullState = "OPEN";
+    await state.run(pr("opened"));
+    const alternateSignal = branchCreated({ head_branch: alternateBranch });
+    await state.run(alternateSignal);
+    expect(state.items[0].fieldValueByName?.name).toBe("In Review");
+
+    state.lifecycle.pullState = "MERGED";
+    await state.run(pr("closed", true));
+    await state.run(alternateSignal);
+    state.lifecycle.pullState = "OPEN";
+    state.lifecycle.pullBranch = alternateBranch;
+    await state.run(pr("opened", false, "Tzahile/budget-app", alternateBranch));
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
+    expect(state.mutations.map(({ variables }) => variables.optionId)).toEqual(["In Review", "Done"]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("recognizes a repairable alias as a higher state without mutating the item", async () => {
+    const alias = option("  in REVIEW ", "legacy-review");
+    const state = harness(statuses().filter(({ name }) => name !== "In Review").concat(alias));
+    state.items[0].fieldValueByName = { optionId: alias.id!, name: alias.name };
+    await state.run(create);
     expect(state.mutations).toEqual([]);
     expect(state.core.setFailed).not.toHaveBeenCalled();
   });
