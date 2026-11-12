@@ -34,7 +34,7 @@ export function AskAi({ request = aiRequest }: { request?: typeof aiRequest }) {
     // Consume consent before awaiting, so failures cannot automatically resend.
     setConfirmed(false);
     try {
-      const result = await request<AiAdviceResponse>("/api/ai/advice", { payload: preview.payload, confirmed: true });
+      const result = await request<AiAdviceResponse>("/api/ai/advice", { payload: preview.payload, previewProof: preview.previewProof, confirmed: true });
       setAdvice(result.advice);
     } catch (error) { setError(error instanceof Error ? error.message : "AI advice is unavailable."); }
     finally { setBusy(false); }
@@ -59,7 +59,7 @@ export function AskAi({ request = aiRequest }: { request?: typeof aiRequest }) {
         <button type="button" disabled={busy || !confirmed || !preview.available} onClick={() => void send()} className="rounded-xl bg-green-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Requesting advice…" : "Confirm and send to Gemini"}</button>
         <button type="button" disabled={busy} onClick={() => { setPreview(null); setConfirmed(false); setAdvice(null); setError(""); }} className="rounded-xl border border-stone-200 px-4 py-3 text-sm">Cancel</button>
       </div>
-      <p className="mt-3 text-xs text-stone-500">This snapshot stays fixed until you create another preview. Cancel closes it without sending.</p>
+      <p className="mt-3 text-xs text-stone-500">Approval expires five minutes after preview. Cancel closes it without sending.</p>
     </div>}
     {advice && <aside aria-label="AI recommendations" className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
       <h3 className="font-semibold text-amber-900">AI recommendations — advisory, not accounting facts</h3>

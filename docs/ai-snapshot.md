@@ -105,14 +105,14 @@ The preview displays that exact string, describes aggregate sensitivity and
 Google Gemini as the external provider, and separates advice from accounting
 facts. It remains fixed until another preview is requested. A checkbox approves
 only the displayed payload; a separate **Confirm and send to Gemini** action
-submits `{ "confirmed": true, "payload": "<the displayed JSON string>" }` to
-`POST /api/ai/advice`. The endpoint requires explicit boolean confirmation,
-rejects extra request fields, validates the nested snapshot fail-closed, and
-requires its serialization to exactly match the supplied string. It does not
-recompute current dashboard figures before sending. This is a stateless
-round-trip, not a signed assertion that the household's balances remain
-unchanged after preview. The allowlisted user can submit validated aggregate
-values; none can alter accounting state.
+submits the displayed JSON string as `payload`, its opaque `previewProof`,
+and `confirmed: true` to `POST /api/ai/advice`. The server verifies the proof
+against the exact bytes, authenticated OAuth session, and request origin. The
+proof expires after five minutes or when the OAuth session expires, whichever
+comes first. The OAuth credential and proof stay outside the provider request.
+The endpoint rejects extra fields and validates the canonical snapshot before
+sending. It sends the approved snapshot even if the household's balances change
+after preview. A new preview is required after expiry.
 
 **Production keeps sending disabled:** the HTTP entrypoint injects no advisor
 into `createAiRoutes`. Preview returns `available: false` with the Italy/free-only
