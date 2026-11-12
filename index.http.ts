@@ -37,6 +37,7 @@ import { csvHeaders, parseCsvTransactions, type CsvColumnMapping } from "./serve
 import { readXlsxWorkbook, parseXlsxSheet } from "./server/xlsx.ts";
 import { deleteCsvMappingProfile, listCsvMappingProfiles, saveCsvMappingProfile } from "./server/csv-profiles.ts";
 import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECURITY_HEADERS } from "./server/security.ts";
+import { bankAccountMappingChoices, bankConnectionsResponse, beginBankConsent, completeBankConsent, disconnectBankConnection, mapBankAccount, syncBankConnection } from "./server/bank-service.ts";
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import { exportBackup } from "./server/backup.ts";
 import { parseTransactionFilters } from "./server/transaction-search.ts";
@@ -90,6 +91,53 @@ app.get("/api/data", async (c) => {
   const asOf = c.req.query("asOf") || householdDate();
   assertDateOnly(asOf);
   return c.json(await getAppData(asOf));
+});
+
+app.get("/api/bank/connections", async (c) => c.json(await bankConnectionsResponse()));
+
+app.post("/api/bank/connect", async (c) => {
+  const session = await getOAuthUserData(c.req.raw);
+  const body = await readBody(c.req.raw);
+  return c.json(await beginBankConsent({
+    institutionId: stringField(body, "institutionId", 128),
+    ownerUsername: session!.user!.username!,
+    origin: new URL(c.req.url).origin,
+  }), 201);
+});
+
+// The provider returns by top-level navigation. One-time state binds the
+// callback to the same authenticated username and exact redirect URI.
+app.get("/api/bank/callback", async (c) => {
+  const session = await getOAuthUserData(c.req.raw);
+  await completeBankConsent({
+    state: c.req.query("state") ?? "", code: c.req.query("code"),
+    ownerUsername: session!.user!.username!,
+    origin: new URL(c.req.url).origin,
+  });
+  return c.redirect("/?bank=connected");
+});
+
+app.get("/api/bank/connections/:id/mappings", async (c) =>
+  c.json(await bankAccountMappingChoices(safeId(c.req.param("id")))));
+
+app.post("/api/bank/connections/:id/mappings", async (c) => {
+  const body = await readBody(c.req.raw);
+  const local = body.accountId;
+  if (local !== null && (typeof local !== "string" || !/^[0-9a-f-]{36}$/i.test(local))) {
+    throw new ValidationError("Invalid local account");
+  }
+  const accountId = await mapBankAccount(safeId(c.req.param("id")),
+    stringField(body, "providerAccountId", 200), local);
+  return c.json({ accountId }, 201);
+});
+
+app.post("/api/bank/connections/:id/sync", async (c) => c.json({
+  ok: true, ...(await syncBankConnection(safeId(c.req.param("id")))),
+}));
+
+app.delete("/api/bank/connections/:id", async (c) => {
+  await disconnectBankConnection(safeId(c.req.param("id")));
+  return c.body(null, 204);
 });
 
 app.get("/api/transactions", async (c) => c.json(await listTransactions(parseTransactionFilters(new URL(c.req.url).searchParams))));

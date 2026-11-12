@@ -33,6 +33,27 @@ export interface AccountReconciliation {
   createdAt: string;
 }
 
+/** Public bank connection metadata. Provider credentials and tokens never reach the browser. */
+export interface BankConnection {
+  id: string;
+  provider: string;
+  institutionId: string;
+  institutionName: string;
+  status: "connected" | "reauth_required" | "disconnected" | "error";
+  expiresAt: string | null;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  accounts: { id: string; accountId: string | null; name: string; currency: string;
+    historyFrom: string | null; historyThrough: string | null; historyGap: boolean }[];
+}
+
+export interface BankConnectionsResponse {
+  available: boolean;
+  reason?: string;
+  institutions?: { id: string; name: string }[];
+  connections: BankConnection[];
+}
+
 export interface Transaction {
   id: string;
   accountId: string;

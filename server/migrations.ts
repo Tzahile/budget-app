@@ -253,6 +253,77 @@ export const migrations: readonly Migration[] = [
         ON imports(source, account_id, retry_key) WHERE retry_key IS NOT NULL`,
     ],
   },
+  // Version 13 is reserved for the currency guards in PR #69.
+  {
+    version: 14,
+    name: "open banking connection and account links",
+    statements: [
+      `CREATE TABLE bank_connections (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        provider_connection_id TEXT NOT NULL,
+        institution_id TEXT NOT NULL,
+        institution_name TEXT NOT NULL,
+        country_code TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('connected', 'reauth_required', 'disconnected', 'error')),
+        consent_expires_at TEXT,
+        sync_revision INTEGER NOT NULL DEFAULT 0,
+        last_synced_at TEXT,
+        safe_error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(provider, provider_connection_id)
+      )`,
+      "CREATE TABLE bank_sync_guards (claim INTEGER NOT NULL CHECK (claim = 1))",
+      `CREATE TABLE bank_account_links (
+        connection_id TEXT NOT NULL REFERENCES bank_connections(id) ON DELETE CASCADE,
+        provider_account_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(connection_id, provider_account_id),
+        UNIQUE(connection_id, account_id)
+      )`,
+      "CREATE INDEX bank_account_links_account_idx ON bank_account_links(account_id)",
+      `CREATE TABLE bank_account_identities (
+        provider TEXT NOT NULL,
+        institution_id TEXT NOT NULL,
+        identity_hash TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+        PRIMARY KEY (provider, institution_id, identity_hash),
+        UNIQUE (provider, institution_id, account_id)
+      )`,
+      `CREATE TABLE bank_consent_attempts (
+        id TEXT PRIMARY KEY,
+        state_hash TEXT NOT NULL UNIQUE,
+        owner_username TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        institution_id TEXT NOT NULL,
+        institution_name TEXT NOT NULL,
+        provider_requisition_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT NOT NULL
+      )`,
+      "ALTER TABLE imports ADD COLUMN bank_connection_id TEXT REFERENCES bank_connections(id) ON DELETE SET NULL",
+      "ALTER TABLE imports ADD COLUMN updated_count INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE transactions ADD COLUMN bank_connection_id TEXT REFERENCES bank_connections(id) ON DELETE SET NULL",
+    ],
+  },
+  {
+    version: 15,
+    name: "bank transaction coverage and history gaps",
+    statements: [
+      `CREATE TABLE bank_account_sync_coverage (
+        account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE RESTRICT,
+        first_date TEXT NOT NULL,
+        last_date TEXT NOT NULL,
+        has_gap INTEGER NOT NULL DEFAULT 0 CHECK (has_gap IN (0, 1)),
+        updated_at TEXT NOT NULL,
+        CHECK (first_date <= last_date)
+      )`,
+    ],
+  },
 ];
 
 export async function migrateDatabase(

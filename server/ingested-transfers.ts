@@ -75,15 +75,19 @@ export function decideTransferCandidateStatements(input: {
             )`,
         args: [input.now, input.transferGroupId, input.candidateId],
       },
+      { sql: "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END", args: [] },
+      { sql: "DELETE FROM bank_sync_guards", args: [] },
       {
         sql: `UPDATE transactions SET kind = 'transfer', transfer_group_id = ?, updated_at = ?
-          WHERE id IN (
+          WHERE transfer_group_id IS NULL AND id IN (
             SELECT outgoing_transaction_id FROM ingested_transfer_candidates WHERE id = ? AND transfer_group_id = ?
             UNION ALL
             SELECT incoming_transaction_id FROM ingested_transfer_candidates WHERE id = ? AND transfer_group_id = ?
           )`,
         args: [input.transferGroupId, input.now, input.candidateId, input.transferGroupId, input.candidateId, input.transferGroupId],
       },
+      { sql: "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 2 THEN 1 ELSE 0 END", args: [] },
+      { sql: "DELETE FROM bank_sync_guards", args: [] },
       {
         sql: `UPDATE ingested_transfer_candidates SET status = 'rejected', decided_at = ?
           WHERE id <> ? AND status IN ('pending', 'deferred') AND (
@@ -104,7 +108,8 @@ export function decideTransferCandidateStatements(input: {
     sql: `UPDATE ingested_transfer_candidates SET status = ?, decided_at = ?, transfer_group_id = NULL
       WHERE id = ? AND status IN ('pending', 'deferred')`,
     args: [status, input.now, input.candidateId],
-  }];
+  }, { sql: "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END", args: [] },
+    { sql: "DELETE FROM bank_sync_guards", args: [] }];
 }
 
 function calendarDayDistance(left: string, right: string): number {
