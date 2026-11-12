@@ -3,10 +3,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 type Option = { id?: string; name: string; color: string; description: string };
-type Item = { id: string; content?: { number: number; repository: { nameWithOwner: string; isPrivate: boolean } }; fieldValueByName: { optionId: string; name: string } | null };
+type Item = { id: string; content?: { number: number; repository: { nameWithOwner: string; isPrivate: boolean } }; fieldValueByName: { optionId: string; name: string; updatedAt?: string } | null };
 type WorkflowRun = {
   event: string;
   conclusion: string;
+  created_at: string;
   head_branch: string | null;
   head_repository: { full_name: string } | null;
 };
@@ -15,7 +16,7 @@ type Context = {
   payload: {
     workflow_run?: WorkflowRun;
     action?: string;
-    pull_request?: { number: number; merged: boolean; head: { ref: string; repo: { full_name: string } | null } };
+    pull_request?: { number: number; merged: boolean; created_at: string; updated_at: string; head: { ref: string; repo: { full_name: string } | null } };
   };
 };
 type Dependencies = { github: { graphql: (query: string, variables?: Record<string, unknown>) => Promise<unknown> }; context: Context; core: { info: (message: string) => void; setFailed: (message: string) => void } };
@@ -34,6 +35,7 @@ const branchCreated = (overrides: Partial<WorkflowRun> = {}): Context => ({
     workflow_run: {
       event: "create",
       conclusion: "success",
+      created_at: "2026-11-11T12:00:00Z",
       head_branch: issueBranch,
       head_repository: { full_name: "Tzahile/budget-app" },
       ...overrides,
@@ -41,14 +43,20 @@ const branchCreated = (overrides: Partial<WorkflowRun> = {}): Context => ({
   },
 });
 const create = branchCreated();
-const pr = (action: string, merged = false, full_name = "Tzahile/budget-app", branch = issueBranch): Context => ({
-  eventName: "pull_request_target", payload: { action, pull_request: { number: 68, merged, head: { ref: branch, repo: { full_name } } } },
+const pr = (action: string, merged = false, full_name = "Tzahile/budget-app", branch = issueBranch, occurredAt = "2026-11-11T13:00:00Z"): Context => ({
+  eventName: "pull_request_target",
+  payload: {
+    action, pull_request: {
+      number: 68, merged, created_at: action === "reopened" ? "2026-11-11T13:00:00Z" : occurredAt,
+      updated_at: occurredAt, head: { ref: branch, repo: { full_name } },
+    },
+  },
 });
 
 function harness(initial = statuses()) {
   const lifecycle = {
     issueClosed: false, branchExists: true, pullState: null as "OPEN" | "CLOSED" | "MERGED" | null, pullBranch: issueBranch,
-    mergedAt: "2026-11-11T14:00:00Z", reopenedAt: null as string | null,
+    mergedAt: "2026-11-11T14:00:00Z", reopenedAt: null as string | null, statusChangedAt: "2026-11-11T14:00:01Z",
   };
   const headRepository = { nameWithOwner: "Tzahile/budget-app" };
   let options = structuredClone(initial);
@@ -59,19 +67,26 @@ function harness(initial = statuses()) {
   ];
   const mutations: { query: string; variables: Record<string, unknown> }[] = [];
   const core = { info: vi.fn<(message: string) => void>(), setFailed: vi.fn<(message: string) => void>() };
+  const currentIssue = () => ({
+    closed: lifecycle.issueClosed,
+    timelineItems: { nodes: lifecycle.reopenedAt ? [{ createdAt: lifecycle.reopenedAt }] : [] },
+  });
   const graphql = vi.fn<Dependencies["github"]["graphql"]>(async (query, variables = {}) => {
     if (query.includes("query StatusProjects")) return { user: { projectsV2: { nodes: [{ id: "project", title: "@Tzahile's budgetApp project" }], pageInfo: { hasNextPage: false } } } };
     if (query.includes("query StatusBranch")) {
       const requestedStates = query.match(/states: \[([^\]]+)\]/)?.[1].split(", ");
       const matchingPull = lifecycle.pullState && variables.branch === lifecycle.pullBranch && requestedStates?.includes(lifecycle.pullState);
       return { repository: {
-        issue: { closed: lifecycle.issueClosed },
+        issue: currentIssue(),
         ref: lifecycle.branchExists ? { name: variables.branch } : null,
-        pullRequests: { nodes: matchingPull ? [{ headRepository }] : [], pageInfo: { hasNextPage: false } },
+        pullRequests: {
+          nodes: matchingPull ? [{ state: lifecycle.pullState, mergedAt: lifecycle.mergedAt, headRepository }] : [],
+          pageInfo: { hasNextPage: false },
+        },
       } };
     }
     if (query.includes("query StatusPullRequest")) return { repository: {
-      issue: { closed: lifecycle.issueClosed, timelineItems: { nodes: lifecycle.reopenedAt ? [{ createdAt: lifecycle.reopenedAt }] : [] } },
+      issue: currentIssue(),
       pullRequest: lifecycle.pullState ? {
         state: lifecycle.pullState, mergedAt: lifecycle.mergedAt, headRefName: lifecycle.pullBranch, headRepository,
       } : null,
@@ -87,7 +102,7 @@ function harness(initial = statuses()) {
     if (query.includes("mutation TransitionIssueStatus")) {
       const item = items.find((value) => value.id === variables.itemId)!;
       const selected = options.find((value) => value.id === variables.optionId)!;
-      item.fieldValueByName = { optionId: selected.id!, name: selected.name };
+      item.fieldValueByName = { optionId: selected.id!, name: selected.name, updatedAt: lifecycle.statusChangedAt };
       return { updateProjectV2ItemFieldValue: { projectV2Item: { id: item.id } } };
     }
     throw new Error("Unexpected synthetic GraphQL operation");
@@ -254,6 +269,61 @@ describe("project Status repair and transitions", () => {
     state.lifecycle.pullState = "MERGED";
     state.lifecycle.reopenedAt = "2026-11-11T15:00:00Z";
     await state.run(pr("closed", true));
+    expect(state.mutations).toEqual([]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("restarts Done on a fresh branch after reopening, skips old reruns, and completes again on the new merge", async () => {
+    const state = harness();
+    state.lifecycle.pullState = "MERGED";
+    await state.run(pr("closed", true));
+    state.lifecycle.reopenedAt = "2026-11-11T15:00:00Z";
+    await state.run(create);
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
+
+    state.lifecycle.statusChangedAt = "2026-11-11T16:00:01Z";
+    const newBranchRun = branchCreated({ created_at: "2026-11-11T16:00:00Z" });
+    await state.run(newBranchRun);
+    state.lifecycle.pullState = "OPEN";
+    await state.run(pr("opened"));
+    expect(state.items[0].fieldValueByName?.name).toBe("In Progress");
+
+    const reopened = pr("reopened", false, "Tzahile/budget-app", issueBranch, "2026-11-11T17:00:00Z");
+    await state.run(reopened);
+    expect(state.items[0].fieldValueByName?.name).toBe("In Review");
+
+    state.lifecycle.pullState = "MERGED";
+    state.lifecycle.mergedAt = "2026-11-11T18:00:00Z";
+    state.lifecycle.statusChangedAt = "2026-11-11T18:00:01Z";
+    await state.run(pr("closed", true));
+    await state.run(newBranchRun);
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
+    expect(state.mutations.map(({ variables }) => variables.optionId)).toEqual(["Done", "In Progress", "In Review", "Done"]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("uses a fresh PR-open event to restart Done even when its branch signal was skipped", async () => {
+    const state = harness();
+    state.items[0].fieldValueByName = { optionId: "Done", name: "Done", updatedAt: "2026-11-11T14:00:00Z" };
+    state.lifecycle.reopenedAt = "2026-11-11T15:00:00Z";
+    state.lifecycle.pullState = "OPEN";
+    state.lifecycle.pullBranch = alternateBranch;
+    await state.run(branchCreated({ head_branch: alternateBranch, created_at: "2026-11-11T16:00:00Z" }));
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
+    await state.run(pr("opened", false, "Tzahile/budget-app", alternateBranch, "2026-11-11T17:00:00Z"));
+    expect(state.items[0].fieldValueByName?.name).toBe("In Review");
+    expect(state.mutations.map(({ variables }) => variables.optionId)).toEqual(["In Review"]);
+    expect(state.core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps Done reached after the latest issue reopen when an earlier branch or review event runs", async () => {
+    const state = harness();
+    state.items[0].fieldValueByName = { optionId: "Done", name: "Done", updatedAt: "2026-11-11T18:00:00Z" };
+    state.lifecycle.reopenedAt = "2026-11-11T15:00:00Z";
+    await state.run(branchCreated({ created_at: "2026-11-11T16:00:00Z" }));
+    state.lifecycle.pullState = "OPEN";
+    await state.run(pr("opened", false, "Tzahile/budget-app", issueBranch, "2026-11-11T17:00:00Z"));
+    expect(state.items[0].fieldValueByName?.name).toBe("Done");
     expect(state.mutations).toEqual([]);
     expect(state.core.setFailed).not.toHaveBeenCalled();
   });

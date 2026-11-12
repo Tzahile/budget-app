@@ -38,63 +38,81 @@ function eventTransition(context) {
     const run = context.payload.workflow_run;
     if (run?.event !== "create" || run.conclusion !== "success" ||
         run.head_repository?.full_name.toLowerCase() !== repository) return null;
-    return { branch: run.head_branch, status: "In Progress" };
+    return { branch: run.head_branch, status: "In Progress", occurredAt: run.created_at };
   }
   if (context.eventName !== "pull_request_target") return null;
   const pr = context.payload.pull_request;
   if (pr?.head.repo?.full_name.toLowerCase() !== repository) return null;
-  if (["opened", "reopened"].includes(context.payload.action)) return { branch: pr.head.ref, status: "In Review", pullNumber: pr.number };
+  if (["opened", "reopened"].includes(context.payload.action)) {
+    const occurredAt = context.payload.action === "opened" ? pr.created_at : pr.updated_at;
+    return { branch: pr.head.ref, status: "In Review", pullNumber: pr.number, occurredAt };
+  }
   if (context.payload.action === "closed" && pr.merged) return { branch: pr.head.ref, status: "Done", pullNumber: pr.number };
   return null;
 }
 
-async function isCurrentTransition(graphql, number, { branch, status, pullNumber }) {
+function issueReopenTime(issue) {
+  const reopenedAt = issue.timelineItems?.nodes[0]?.createdAt;
+  return reopenedAt ? Date.parse(reopenedAt) : null;
+}
+
+async function currentTransition(graphql, number, { branch, status, pullNumber, occurredAt }) {
   const repository = `${owner}/${repo}`.toLowerCase();
   if (status !== "In Progress") {
     if (!Number.isSafeInteger(pullNumber) || pullNumber < 1) throw new SyncFailure("Invalid pull request number");
-    const result = await graphql(`query StatusPullRequest($owner: String!, $repo: String!, $number: Int!, $pullNumber: Int!, $checkReopen: Boolean!) {
+    const result = await graphql(`query StatusPullRequest($owner: String!, $repo: String!, $number: Int!, $pullNumber: Int!) {
       repository(owner: $owner, name: $repo) {
         issue(number: $number) {
           closed
-          timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) @include(if: $checkReopen) {
+          timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) {
             nodes { ... on ReopenedEvent { createdAt } }
           }
         }
         pullRequest(number: $pullNumber) { state mergedAt headRefName headRepository { nameWithOwner } }
       }
-    }`, { owner, repo, number, pullNumber, checkReopen: status === "Done" });
+    }`, { owner, repo, number, pullNumber });
     const { issue, pullRequest } = result.repository ?? {};
     if (!issue) throw new SyncFailure("Linked issue was not found");
     if (!pullRequest) throw new SyncFailure("Linked pull request was not found");
-    if (pullRequest.headRefName !== branch || pullRequest.headRepository?.nameWithOwner.toLowerCase() !== repository) return false;
+    if (pullRequest.headRefName !== branch || pullRequest.headRepository?.nameWithOwner.toLowerCase() !== repository) return null;
+    const reopenedAt = issueReopenTime(issue);
     if (status === "Done") {
-      const reopenedAt = issue.timelineItems?.nodes[0]?.createdAt;
-      return pullRequest.state === "MERGED" && (!reopenedAt || Date.parse(pullRequest.mergedAt) >= Date.parse(reopenedAt));
+      return pullRequest.state === "MERGED" && (reopenedAt === null || Date.parse(pullRequest.mergedAt) > reopenedAt)
+        ? { reopenedAt } : null;
     }
-    return !issue.closed && pullRequest.state === "OPEN";
+    return !issue.closed && pullRequest.state === "OPEN" && (reopenedAt === null || Date.parse(occurredAt) > reopenedAt)
+      ? { reopenedAt } : null;
   }
 
   let cursor = null;
+  let reopenedAt = null;
   do {
     const result = await graphql(`query StatusBranch($owner: String!, $repo: String!, $number: Int!, $branch: String!, $ref: String!, $cursor: String) {
       repository(owner: $owner, name: $repo) {
-        issue(number: $number) { closed }
+        issue(number: $number) {
+          closed
+          timelineItems(last: 1, itemTypes: [REOPENED_EVENT]) {
+            nodes { ... on ReopenedEvent { createdAt } }
+          }
+        }
         ref(qualifiedName: $ref) { name }
         pullRequests(first: 100, after: $cursor, headRefName: $branch, states: [OPEN, MERGED]) {
-          nodes { headRepository { nameWithOwner } }
+          nodes { state mergedAt headRepository { nameWithOwner } }
           pageInfo { hasNextPage endCursor }
         }
       }
     }`, { owner, repo, number, branch, ref: `refs/heads/${branch}`, cursor });
     const { issue, ref, pullRequests } = result.repository ?? {};
     if (!issue) throw new SyncFailure("Linked issue was not found");
-    if (issue.closed || !ref) return false;
+    reopenedAt = issueReopenTime(issue);
+    if (issue.closed || !ref || (reopenedAt !== null && !(Date.parse(occurredAt) > reopenedAt))) return null;
     if (!pullRequests) throw new SyncFailure("Could not check branch pull requests");
-    if (pullRequests.nodes.some((pr) => pr.headRepository?.nameWithOwner.toLowerCase() === repository)) return false;
+    if (pullRequests.nodes.some((pr) => pr.headRepository?.nameWithOwner.toLowerCase() === repository &&
+      (pr.state === "OPEN" || reopenedAt === null || !(Date.parse(pr.mergedAt) < reopenedAt)))) return null;
     cursor = pullRequests.pageInfo.hasNextPage ? pullRequests.pageInfo.endCursor : null;
     if (pullRequests.pageInfo.hasNextPage && !cursor) throw new SyncFailure("Incomplete branch pull request lookup");
   } while (cursor);
-  return true;
+  return { reopenedAt };
 }
 
 async function snapshotItems(graphql, projectId, fieldName) {
@@ -105,7 +123,7 @@ async function snapshotItems(graphql, projectId, fieldName) {
       node(id: $projectId) { ... on ProjectV2 {
         items(first: 100, after: $cursor) {
           nodes { id
-            fieldValueByName(name: $fieldName) { ... on ProjectV2ItemFieldSingleSelectValue { optionId name } }
+            fieldValueByName(name: $fieldName) { ... on ProjectV2ItemFieldSingleSelectValue { optionId name updatedAt } }
             content { ... on Issue { number repository { nameWithOwner isPrivate } } }
           }
           pageInfo { hasNextPage endCursor }
@@ -139,7 +157,8 @@ async function syncProjectStatus({ github, context, core }) {
     const number = Number(match[1]);
     if (!Number.isSafeInteger(number) || number < 1) throw new SyncFailure("Invalid branch issue number");
     const graphql = github.graphql.bind(github);
-    if (!await isCurrentTransition(graphql, number, transition)) {
+    const lifecycle = await currentTransition(graphql, number, transition);
+    if (!lifecycle) {
       core.info(`Issue #${number}: stale ${transition.status} event; leaving project unchanged.`);
       return;
     }
@@ -182,7 +201,10 @@ async function syncProjectStatus({ github, context, core }) {
     const selectedOption = repair.options.find(({ id }) => id && id === item.fieldValueByName?.optionId);
     const currentRank = canonical.findIndex(({ name }) => name === selectedOption?.name);
     const targetRank = canonical.findIndex(({ name }) => name === transition.status);
-    if (currentRank > targetRank) {
+    // A reopen starts a new lifecycle only when the recorded Done predates it.
+    const restarting = selectedOption?.name === "Done" && lifecycle.reopenedAt !== null &&
+      Date.parse(item.fieldValueByName?.updatedAt) < lifecycle.reopenedAt;
+    if (currentRank > targetRank && !restarting) {
       core.info(`Issue #${number}: already ${selectedOption.name}; ignoring earlier ${transition.status} event.`);
       return;
     }

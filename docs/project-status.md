@@ -44,13 +44,18 @@ documented queue limit still applies). See
 [workflow concurrency](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
 Before touching the Project, runs read the current issue and pull request
 lifecycle. A branch signal is skipped if the issue is closed, the branch was
-deleted, or a same-repository PR for that branch is open or merged. A live
+deleted, or a same-repository PR for that branch is open or merged in the
+current issue cycle. A live
 branch with only closed, unmerged PRs can still move an issue to **In Progress**.
 Review transitions require an open issue and PR. Done requires a merged PR
 whose merge did not precede the most recent reopening of the issue.
 Automation preserves higher Project statuses across all branches for an issue.
-To restart work on a reopened issue that is still marked **Done**, reset its
-Project Status before creating a branch or reopening a PR.
+When an issue reopens after its **Done** status was recorded, a later
+branch creation or PR opening/reopening starts a new cycle. Automation uses
+the issue's latest reopen time, the Project field's update time, and the
+original branch signal run's creation time or PR webhook timestamp. Events
+at or before the reopen timestamp are skipped because they cannot be
+verified as part of the new cycle.
 
 ## Project token setup
 
