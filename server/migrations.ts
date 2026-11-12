@@ -253,8 +253,9 @@ export const migrations: readonly Migration[] = [
         ON imports(source, account_id, retry_key) WHERE retry_key IS NOT NULL`,
     ],
   },
+  // Version 13 is reserved for the currency guards in PR #69.
   {
-    version: 13,
+    version: 14,
     name: "open banking connection and account links",
     statements: [
       `CREATE TABLE bank_connections (
@@ -310,7 +311,7 @@ export const migrations: readonly Migration[] = [
     ],
   },
   {
-    version: 14,
+    version: 15,
     name: "bank transaction coverage and history gaps",
     statements: [
       `CREATE TABLE bank_account_sync_coverage (

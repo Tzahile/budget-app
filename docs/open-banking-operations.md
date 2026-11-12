@@ -20,6 +20,14 @@ fall back to another provider, model or paid service. API behavior follows the
 
 ## Deployment configuration and first consent test
 
+Before deploying this branch to the shared Val Town database, land the currency
+guards from PR #69 and integrate the updated `main`. The currency guards use
+migration 13, followed by the Open Banking migrations 14 and 15. Use a fresh
+database for isolated testing if an earlier draft already applied the old
+Open Banking migrations at versions 13 and 14. If those old migrations reached
+a shared database, stop the rollout until its migration history has been verified
+and an upgrade path has been prepared.
+
 Store secrets only in Val Town's server environment. Never paste them into an issue,
 PR, frontend configuration, screenshot, log or source file.
 

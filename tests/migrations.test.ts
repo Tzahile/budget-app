@@ -48,7 +48,7 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15]);
     expect(columns("accounts")).toContain("is_demo");
     expect(tableExists("bank_account_identities")).toBe(true);
     expect(tableExists("bank_account_sync_coverage")).toBe(true);
@@ -87,7 +87,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -100,6 +100,19 @@ describe("database migrations", () => {
 
     expect(sqlite.prepare("SELECT version, applied_at FROM schema_migrations ORDER BY version").all())
       .toEqual(migrations.map((migration) => ({ version: migration.version, applied_at: appliedAt })));
+  });
+
+  it("upgrades a version-12 database while preserving existing import history", async () => {
+    await migrateDatabase(database, migrations.filter(({ version }) => version <= 12), () => appliedAt);
+    sqlite.prepare(`INSERT INTO imports (id, filename, status, source, created_at)
+      VALUES ('legacy-import', 'synthetic.xlsx', 'completed', 'xlsx', ?)`).run(appliedAt);
+
+    await migrateDatabase(database, migrations, () => appliedAt);
+
+    expect(sqlite.prepare("SELECT source, bank_connection_id, updated_count FROM imports WHERE id = 'legacy-import'").get())
+      .toMatchObject({ source: "xlsx", bank_connection_id: null, updated_count: 0 });
+    expect(tableExists("bank_connections")).toBe(true);
+    expect(tableExists("bank_account_sync_coverage")).toBe(true);
   });
 
   it("preserves existing CSV and Open Banking history while widening the source constraint", async () => {
@@ -185,15 +198,15 @@ describe("database migrations", () => {
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 15,
+      version: 16,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 15 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 16 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15]);
   });
 });
 
