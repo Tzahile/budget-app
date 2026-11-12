@@ -193,3 +193,75 @@ it("shows source denominations and blocks foreign currencies even beyond the pre
   expect(rejected.status).toBe(422);
   expect(database.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual(before);
 });
+
+it("detects source currency with a legacy profile and audits blocked CSV and XLSX rows", async () => {
+  const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
+  const post = (path: string, body: unknown) => request(path, { method: "POST", headers, body: JSON.stringify(body) });
+  const legacyMapping = { date: "Date", amount: "Amount", description: "Description", decimalSeparator: "." };
+  const saved = await post("/api/imports/csv/profiles", { name: "Synthetic legacy profile", mapping: legacyMapping });
+  expect(saved.status).toBe(201);
+  const { id } = await saved.json() as { id: string };
+  const { profiles } = await (await request("/api/imports/csv/profiles")).json() as {
+    profiles: Array<{ id: string; mapping: typeof legacyMapping }>;
+  };
+  const mapping = profiles.find((profile) => profile.id === id)!.mapping;
+  expect(mapping).not.toHaveProperty("currency");
+  const created = await post("/api/accounts", { name: "Synthetic currency audit", type: "checking", balanceCents: 7_000 });
+  expect(created.status).toBe(201);
+  const account = database.prepare("SELECT id FROM accounts WHERE name = ?").get("Synthetic currency audit")!;
+  const accountId = String(account.id);
+
+  const csv = "Date,Amount,Description,Currency\n2026-09-16,-2.00,Synthetic foreign,USD\ninvalid,-3.00,Synthetic malformed,EUR\n2026-09-18,-4.00,Synthetic valid,EUR\n";
+  const csvPreview = await post("/api/imports/csv/preview", { csv, mapping });
+  expect(await csvPreview.json()).toMatchObject({
+    unsupportedCurrencyCount: 1,
+    sample: [{ currency: "USD" }, { currency: "EUR" }],
+  });
+
+  const workbook = new ExcelJS.Workbook();
+  const first = workbook.addWorksheet("First");
+  first.addRow(["Date", "Amount", "Description"]);
+  first.addRow(["2026-09-16", -1, "Synthetic default"]);
+  const switched = workbook.addWorksheet("Switched");
+  switched.addRow(["Date", "Amount", "Description", "  VaLuTa  "]);
+  switched.addRow(["2026-09-16", -2, "Synthetic foreign", "USD"]);
+  switched.addRow(["invalid", -3, "Synthetic malformed", "EUR"]);
+  switched.addRow(["2026-09-18", -4, "Synthetic valid", "EUR"]);
+  const xlsx = Buffer.from(await workbook.xlsx.writeBuffer()).toString("base64");
+  const firstPreview = await post("/api/imports/xlsx/preview", { xlsx, mapping, sheet: "First" });
+  expect(await firstPreview.json()).toMatchObject({ sheet: "First", unsupportedCurrencyCount: 0 });
+  const switchedPreview = await post("/api/imports/xlsx/preview", { xlsx, mapping, sheet: "Switched" });
+  expect(await switchedPreview.json()).toMatchObject({ sheet: "Switched", unsupportedCurrencyCount: 1 });
+
+  const attempts = [
+    { source: "csv", data: { csv } },
+    { source: "xlsx", data: { xlsx, sheet: "Switched" } },
+  ];
+  for (const { source, data } of attempts) {
+    const body = { accountId, filename: `synthetic-currency.${source}`, retryKey: "currency-audit", mapping, ...data };
+    const response = await post(`/api/imports/${source}`, body);
+    expect(response.status).toBe(422);
+    const rejected = await response.json() as { importId: string; errors: string[] };
+    expect(rejected.importId).toBeTruthy();
+    expect(rejected.errors).toEqual(expect.arrayContaining([
+      expect.stringContaining("Only EUR is supported"),
+      "Row 3: date is invalid",
+    ]));
+    const replay = await post(`/api/imports/${source}`, body);
+    expect(replay.status).toBe(422);
+    expect(await replay.json()).toMatchObject({ importId: rejected.importId });
+    const history = await (await request("/api/imports?limit=10")).json() as { imports: unknown[] };
+    expect(history.imports).toContainEqual(expect.objectContaining({
+      id: rejected.importId,
+      status: "failed",
+      items: [
+        expect.objectContaining({ sourcePosition: 2, status: "error", errorCode: "unsupported_currency" }),
+        expect.objectContaining({ sourcePosition: 3, status: "error", errorCode: "invalid_date" }),
+        expect.objectContaining({ sourcePosition: 4, status: "error", errorCode: "run_blocked" }),
+      ],
+    }));
+    expect(JSON.stringify(history)).not.toContain("Synthetic foreign");
+  }
+  expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)).toMatchObject({ balance_cents: 7_000 });
+  expect(database.prepare("SELECT COUNT(*) AS count FROM transactions WHERE account_id = ?").get(accountId)).toMatchObject({ count: 0 });
+});

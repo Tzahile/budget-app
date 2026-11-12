@@ -11,7 +11,7 @@ beforeEach(() => {
   db.exec(`
     CREATE TABLE accounts (
       id TEXT PRIMARY KEY, balance_cents INTEGER NOT NULL, is_active INTEGER NOT NULL,
-      updated_at TEXT NOT NULL, is_demo INTEGER NOT NULL DEFAULT 0
+      updated_at TEXT NOT NULL, is_demo INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'EUR'
     );
     CREATE TABLE account_reconciliations (
       id TEXT PRIMARY KEY,
@@ -133,4 +133,11 @@ describe("account reconciliation SQL batch", () => {
     expect(accountBalance("account-inactive")).toBe(50_000);
     expect(db.prepare("SELECT COUNT(*) AS count FROM account_reconciliations").get()).toMatchObject({ count: 0 });
   });
+  it("does not write a balance or audit entry for a stored foreign account", () => {
+    db.prepare("UPDATE accounts SET currency = 'USD' WHERE id = 'account-a'").run();
+    reconcile(25_000);
+    expect(accountBalance()).toBe(100_000);
+    expect(audit()).toBeUndefined();
+  });
+
 });

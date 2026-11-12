@@ -181,13 +181,17 @@ currencies, including inactive or zero-value inputs, fail closed; no FX rate,
 conversion, or cross-currency transfer is inferred. The current web views and AI
 snapshot builder reject non-EUR data rather than formatting it as euros.
 
-CSV/XLSX mappings can include a currency column. Mapped codes must be uppercase
-three-letter codes and must match the target account before any ingestion write.
-If no currency column exists, the target account supplies the denomination.
+CSV/XLSX imports detect a single Currency or Valuta column in the selected
+file or sheet, including when a saved mapping omits it. Custom currency headers
+can be mapped explicitly. Currency codes must be three uppercase letters.
+Foreign currency and malformed rows block the whole import and are recorded in
+failed-run history. If there is no detected or mapped currency column, the
+target account supplies the denomination.
 Account-scoped ingestion identities remain unchanged so prior imports still
 deduplicate. Migration 13 makes denominations immutable and guards transaction /
 account, planned / account, and reserve / planned currency relationships. It
 preserves legacy rows without converting their amounts; unsupported legacy data
-can still be exported, but cannot enter EUR dashboard totals. Supporting another
+can still be exported. EUR dashboard totals and account balance changes reject
+unsupported denominations. Supporting another
 currency requires an explicit product decision about formatting, currency minor
 unit precision and UI; these guards are not an FX feature.

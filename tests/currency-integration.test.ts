@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createAccount, getAppData, ingestTransactions, listTransactions } from "../server/repository.ts";
+import { completePlanned, createAccount, createPlanned, createTransaction, deleteTransaction, getAppData, ingestTransactions, listTransactions, reconcileAccount, updateTransaction } from "../server/repository.ts";
 import { exportBackup } from "../server/backup.ts";
 import { useTestSqlite } from "./support/val-sqlite.ts";
 
@@ -35,4 +35,26 @@ describe("stored currency boundaries", () => {
     await expect(getAppData("2026-09-30")).rejects.toThrow("Only EUR");
     await expect(listTransactions({ limit: 50 })).rejects.toThrow("Only EUR");
   });
+  it("blocks reconciliation and balance mutations against a stored foreign account", async () => {
+    const accountId = "synthetic-usd-mutation";
+    database.prepare("INSERT INTO accounts (id, name, type, currency, balance_cents, created_at, updated_at) VALUES (?, 'Synthetic USD', 'checking', 'USD', 2222, '2026-09-01', '2026-09-01')").run(accountId);
+    database.prepare(`INSERT INTO transactions (id, account_id, date, amount_cents, currency, description, kind, status, source, created_at, updated_at)
+      VALUES ('synthetic-usd-mutation-tx', ?, '2026-09-16', -200, 'USD', 'Synthetic USD debit', 'expense', 'cleared', 'manual', '2026-09-16', '2026-09-16')`).run(accountId);
+    const euro = database.prepare("SELECT id FROM accounts WHERE currency = 'EUR'").get()!;
+    const date = "2026-09-16";
+    const transaction = { accountId, date, amountCents: 100, description: "Synthetic", kind: "expense" as const };
+    await expect(reconcileAccount(accountId, { actualBalanceCents: 1234, date, note: "Synthetic" })).rejects.toMatchObject({ status: 422 });
+    await expect(createTransaction(transaction)).rejects.toMatchObject({ status: 422 });
+    await expect(updateTransaction("synthetic-usd-mutation-tx", { ...transaction, accountId: String(euro.id) })).rejects.toMatchObject({ status: 422 });
+    await expect(deleteTransaction("synthetic-usd-mutation-tx")).rejects.toMatchObject({ status: 422 });
+
+    await createPlanned({ accountId: String(euro.id), description: "Synthetic EUR plan", kind: "expense", amountCents: 100, recurrence: "once", intervalCount: 1, nextDate: date, endDate: null, isActive: true });
+    const planned = database.prepare("SELECT id FROM planned_transactions WHERE description = 'Synthetic EUR plan'").get()!;
+    await expect(completePlanned(String(planned.id), date, accountId)).rejects.toMatchObject({ status: 422 });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)).toMatchObject({ balance_cents: 2222 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM transactions WHERE account_id = ?").get(accountId)).toMatchObject({ count: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM account_reconciliations WHERE account_id = ?").get(accountId)).toMatchObject({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM planned_completions WHERE planned_transaction_id = ?").get(planned.id!)).toMatchObject({ count: 0 });
+  });
+
 });
