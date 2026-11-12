@@ -1,3 +1,4 @@
+import { assertSupportedCurrency, DEFAULT_CURRENCY } from "../shared/currency.ts";
 import { assertDateOnly } from "../shared/finance.ts";
 
 export class ValidationError extends Error {
@@ -83,5 +84,12 @@ export function booleanField(body: Record<string, unknown>, key: string, fallbac
   const value = body[key];
   if (value == null) return fallback;
   if (typeof value !== "boolean") throw new ValidationError(`${key} is invalid`);
+  return value;
+}
+
+/** Omitted currency preserves the EUR default; explicit foreign money fails closed. */
+export function currencyField(body: Record<string, unknown>): string {
+  const value = body.currency === undefined ? DEFAULT_CURRENCY : body.currency;
+  assertSupportedCurrency(value);
   return value;
 }

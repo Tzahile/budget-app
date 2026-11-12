@@ -92,6 +92,31 @@ const initialSchema: MigrationStatement[] = [
   )`,
 ];
 
+// Guards preserve existing data and keep denomination changes from reinterpreting
+// stored minor units or invalidating account-scoped ingestion identities.
+const currencyGuards: MigrationStatement[] = ["accounts", "transactions", "planned_transactions", "reserves"].flatMap((table) => [
+  `CREATE TRIGGER ${table}_currency_insert BEFORE INSERT ON ${table}
+    WHEN length(NEW.currency) <> 3 OR NEW.currency GLOB '*[^A-Z]*'
+    BEGIN SELECT RAISE(ABORT, 'Invalid currency code'); END`,
+  `CREATE TRIGGER ${table}_currency_update BEFORE UPDATE OF currency ON ${table}
+    WHEN NEW.currency IS NOT OLD.currency
+    BEGIN SELECT RAISE(ABORT, 'Currency is immutable; conversion is unsupported'); END`,
+]);
+for (const operation of ["INSERT", "UPDATE"] as const) {
+  currencyGuards.push(
+    `CREATE TRIGGER transactions_currency_account_${operation.toLowerCase()} BEFORE ${operation} ON transactions
+      WHEN NEW.currency <> (SELECT currency FROM accounts WHERE id = NEW.account_id)
+      BEGIN SELECT RAISE(ABORT, 'Transaction currency must match account'); END`,
+    `CREATE TRIGGER planned_currency_account_${operation.toLowerCase()} BEFORE ${operation} ON planned_transactions
+      WHEN NEW.account_id IS NOT NULL AND NEW.currency <> (SELECT currency FROM accounts WHERE id = NEW.account_id)
+      BEGIN SELECT RAISE(ABORT, 'Planned currency must match account'); END`,
+    `CREATE TRIGGER reserves_currency_plan_${operation.toLowerCase()} BEFORE ${operation} ON reserves
+      WHEN NEW.linked_planned_transaction_id IS NOT NULL AND
+        NEW.currency <> (SELECT currency FROM planned_transactions WHERE id = NEW.linked_planned_transaction_id)
+      BEGIN SELECT RAISE(ABORT, 'Reserve currency must match planned obligation'); END`,
+  );
+}
+
 export const migrations: readonly Migration[] = [
   { version: 1, name: "initial schema", statements: initialSchema },
   {
@@ -253,6 +278,7 @@ export const migrations: readonly Migration[] = [
         ON imports(source, account_id, retry_key) WHERE retry_key IS NOT NULL`,
     ],
   },
+  { version: 13, name: "currency denomination guards", statements: currencyGuards },
 ];
 
 export async function migrateDatabase(
