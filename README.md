@@ -27,7 +27,8 @@ available to spend.
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
 - server-only Gemini advisory adapter with strict redacted input and bounded
-  advisory output; no active AI endpoint or UI (Italy free-tier rollout blocked)
+  advisory output, optional exact-payload Ask AI preview and explicit consent;
+  external sending remains disabled (Italy free-tier rollout blocked)
 
 All persisted money uses integer EUR cents. See
 [`docs/financial-semantics.md`](docs/financial-semantics.md) for the exact

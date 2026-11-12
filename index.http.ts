@@ -1,6 +1,7 @@
 // Val Town infers the HTTP trigger from the `.http.ts` filename.
 import { Hono } from "npm:hono@4.13.7";
 import { getOAuthUserData, oauthMiddleware } from "https://esm.town/v/std/oauth/middleware.ts";
+import { getOrCreateEncryptionKeyMaterial } from "https://esm.town/v/std/oauth/crypto.ts";
 import { parseVal, serveImmutableFile } from "https://esm.town/v/std/utils/index.ts";
 import { assertDateOnly, householdDate } from "./shared/finance.ts";
 import { Root } from "./frontend/root.tsx";
@@ -40,6 +41,7 @@ import { isTrustedMutationRequest, MAX_CSV_JSON_BODY_BYTES, readJsonObject, SECU
 import { DEMO_CLEANUP_CONFIRMATION } from "./shared/types.ts";
 import { exportBackup } from "./server/backup.ts";
 import { parseTransactionFilters } from "./server/transaction-search.ts";
+import { createAiRoutes, type AiSession } from "./server/ai-routes.ts";
 import {
   booleanField,
   centsField,
@@ -55,7 +57,7 @@ import {
   ValidationError,
 } from "./server/validation.ts";
 
-const app = new Hono();
+const app = new Hono<{ Variables: { aiSession: AiSession } }>();
 
 app.use("*", async (c, next) => {
   await next();
@@ -83,6 +85,9 @@ app.use("/api/*", async (c, next) => {
   if (!isTrustedMutationRequest(c.req.raw)) {
     return c.json({ error: "Invalid request origin" }, 403);
   }
+  if (session.user.username && session.accessToken && Number.isSafeInteger(session.expiresAt)) {
+    c.set("aiSession", { username: session.user.username, accessToken: session.accessToken, expiresAt: session.expiresAt });
+  }
   await next();
 });
 
@@ -91,6 +96,13 @@ app.get("/api/data", async (c) => {
   assertDateOnly(asOf);
   return c.json(await getAppData(asOf));
 });
+
+// Live AI remains disabled pending the Italy/free-only provider decision.
+// Do not inject GeminiAdvisor or expose a configuration switch around this gate.
+app.route("/api/ai", createAiRoutes({
+  getDashboard: async () => (await getAppData(householdDate())).dashboard,
+  getSigningKeyMaterial: (origin) => getOrCreateEncryptionKeyMaterial(`${origin}/auth/callback`),
+}));
 
 app.get("/api/transactions", async (c) => c.json(await listTransactions(parseTransactionFilters(new URL(c.req.url).searchParams))));
 
