@@ -179,6 +179,30 @@ describe("bank snapshot accounting conflicts", () => {
     }
   });
 
+  it("rolls back a staged bank booking when a pending statement wins the same ID", async () => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic pending race");
+    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Concurrent booking", externalId: "bank-id" };
+    const batch = db.batch.bind(db);
+    const concurrentImport = vi.spyOn(db, "batch").mockImplementationOnce(async (statements) => {
+      await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement",
+        transactions: [{ ...booking, status: "pending" }] });
+      return await batch(statements);
+    });
+    try {
+      await expect(applyBankConnectionSnapshot({ connectionId, provider: "synthetic", expectedRevision: 1,
+        accounts: [{ ...account, transactions: [booking] }] }))
+        .rejects.toMatchObject({ status: 409, importId: expect.any(String) });
+    } finally {
+      concurrentImport.mockRestore();
+    }
+    expect(database.prepare("SELECT status, bank_connection_id FROM transactions WHERE account_id = ?").get(accountId))
+      .toEqual({ status: "pending", bank_connection_id: null });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(0);
+    expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_sync_coverage").get()!.n).toBe(0);
+    expect(database.prepare("SELECT COUNT(*) AS n FROM account_reconciliations").get()!.n).toBe(0);
+    expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(connectionId)!.sync_revision).toBe(1);
+  });
+
   it.each(["csv", "xlsx"] as const)("checks %s bookings against committed bank coverage", async (source) => {
     const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic bank-first account");
     const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Shared entry", externalId: "bank-id" };

@@ -170,9 +170,10 @@ Retry so it can assess the committed IDs.
 
 Map the verified provider ID column when importing a statement for the first
 time, if the export includes it. Reimporting an earlier statement with added
-IDs does not retrofit IDs onto existing fingerprint rows. BudgetApp has no
-automatic merge or relabeling for those rows. Resolve the overlap before
-resuming sync for that account.
+IDs does not retrofit IDs onto existing fingerprint rows. BudgetApp has no in-app recovery for
+those rows. Imported transactions cannot be edited or deleted, and balance
+reconciliation does not fix transaction identity. Verified identity recovery
+and history backfill without balance changes require a future workflow.
 
 Failed sync attempts record a safe audit entry only after their
 financial snapshot has rolled back. Account-history start and gap flags are

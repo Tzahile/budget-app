@@ -201,9 +201,10 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
   }];
   for (const transaction of imported) {
     statements.push({
-      // The unique identity is the final concurrency guard. `changes()` keeps
-      // a concurrent retry from applying a balance update after INSERT IGNORE.
-      sql: `INSERT OR IGNORE INTO transactions
+      // A bank snapshot must roll back if an accepted identity was written
+      // after staging. Otherwise it can reconcile cash without its booking.
+      // For statement retries, changes() keeps ignored rows off the balance.
+      sql: `${input.bankConnectionId ? "INSERT" : "INSERT OR IGNORE"} INTO transactions
         (id, account_id, date, amount_cents, currency, description, kind, status, source,
          external_id, import_identity, raw_metadata, created_at, updated_at, is_demo, bank_connection_id)
         VALUES (?, ?, ?, ?, 'EUR', ?, ?, ?, 'import', ?, ?, ?, ?, ?, 0, ?)`,
