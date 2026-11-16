@@ -197,14 +197,15 @@ describe("database migrations", () => {
 
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
+    const nextVersion = Math.max(...migrations.map(({ version }) => version)) + 1;
     const broken: Migration = {
-      version: 16,
+      version: nextVersion,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 16 (synthetic broken migration) failed");
+      .rejects.toThrow(`Database migration ${nextVersion} (synthetic broken migration) failed`);
     expect(tableExists("should_roll_back")).toBe(false);
     expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 17]);
   });
