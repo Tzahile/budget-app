@@ -49,7 +49,7 @@ describe("bank consent callback", () => {
     const exchangeAuthorization = vi.fn();
     const getRequisition = vi.fn();
     const deleteRequisition = vi.fn();
-    const adapter = { providerId: "gocardless-bank-account-data", exchangeAuthorization, getRequisition, deleteRequisition } as BankProviderClient;
+    const adapter = { providerId: "gocardless-bank-account-data", exchangeAuthorization, getRequisition, deleteRequisition } as unknown as BankProviderClient;
     await expect(completeBankConsent({ ...input, ownerUsername: "synthetic-outsider" }, adapter)).rejects.toMatchObject({ status: 400 });
     expect(deleteRequisition).not.toHaveBeenCalled();
     await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 503 });
@@ -65,7 +65,7 @@ describe("bank consent callback", () => {
     useGoCardlessEnvironment({ BUDGET_APP_BANK_SYNC_VERIFIED: "false" });
     const getRequisition = vi.fn();
     const deleteRequisition = vi.fn().mockRejectedValue(new Error("synthetic private provider detail"));
-    const adapter = { providerId: "gocardless-bank-account-data", getRequisition, deleteRequisition } as BankProviderClient;
+    const adapter = { providerId: "gocardless-bank-account-data", getRequisition, deleteRequisition } as unknown as BankProviderClient;
     await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({
       status: 503, message: "Bank consent is disabled or not verified",
     });
@@ -80,7 +80,7 @@ describe("bank consent callback", () => {
     const exchangeAuthorization = vi.fn();
     const getRequisition = vi.fn();
     const deleteRequisition = vi.fn();
-    const adapter = { providerId: "enable-banking", exchangeAuthorization, getRequisition, deleteRequisition } as BankProviderClient;
+    const adapter = { providerId: "enable-banking", exchangeAuthorization, getRequisition, deleteRequisition } as unknown as BankProviderClient;
     await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 503 });
     expect(exchangeAuthorization).not.toHaveBeenCalled();
     expect(getRequisition).not.toHaveBeenCalled();
