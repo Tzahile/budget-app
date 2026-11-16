@@ -1,7 +1,8 @@
 import { db } from "../server/db.ts";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { useTestSqlite } from "./support/val-sqlite.ts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { sqlite, useTestSqlite } from "./support/val-sqlite.ts";
+import { migrateDatabase } from "../server/migrations.ts";
 import { confirmBankAccountMapping, createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections, createBankConsentAttempt, hashBankConsentState } from "../server/repository.ts";
 import { completeBankConsent, disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
 import { createGoCardlessClient } from "../server/gocardless.ts";
@@ -11,9 +12,13 @@ function useGoCardlessEnvironment(overrides: Record<string, string> = {}) {
   const values: Record<string, string> = { BUDGET_APP_BANK_PROVIDER: "gocardless-bank-account-data", BUDGET_APP_BANK_SYNC_VERIFIED: "true", BUDGET_APP_BBVA_ITALY_INSTITUTION_ID: "it-synthetic", BUDGET_APP_GOCARDLESS_SECRET_ID: "synthetic", BUDGET_APP_GOCARDLESS_SECRET_KEY: "synthetic", ...overrides };
   Object.assign(globalThis, { Deno: { env: { get: (name: string) => values[name] } } });
 }
-beforeAll(() => { database = new DatabaseSync(":memory:"); useTestSqlite(database); useGoCardlessEnvironment(); });
-afterAll(() => database.close());
-beforeEach(() => useGoCardlessEnvironment());
+beforeEach(async () => {
+  database = new DatabaseSync(":memory:");
+  useTestSqlite(database);
+  useGoCardlessEnvironment();
+  await migrateDatabase(sqlite);
+});
+afterEach(() => database.close());
 
 describe("bank consent callback", () => {
   const origin = "https://budget.example";
@@ -342,4 +347,30 @@ it("marks locally expired consent as requiring reauthorization before provider r
   expect(adapter.getRequisition).not.toHaveBeenCalled();
   expect(database.prepare("SELECT status, safe_error_code FROM bank_connections WHERE id = ?").get(id))
     .toMatchObject({ status: "reauth_required", safe_error_code: "consent_expired" });
+});
+
+it("requires owner confirmation for an unfamiliar identity even when all household accounts are mapped", async () => {
+  const original = await createBankConnection({ provider: "gocardless-bank-account-data", providerConnectionId: "prior-mapping",
+    institutionId: "it-synthetic", institutionName: "Synthetic", countryCode: "IT" });
+  const replacement = await createBankConnection({ provider: "gocardless-bank-account-data", providerConnectionId: "changed-mapping",
+    institutionId: "it-synthetic", institutionName: "Synthetic", countryCode: "IT" });
+  let providerAccountId = "prior-account";
+  let iban = "IT60X0542811101000000222222";
+  const adapter = { providerId: "gocardless-bank-account-data",
+    getRequisition: async () => ({ status: "LN", accounts: [providerAccountId], institutionId: "it-synthetic" }),
+    getAccount: async (id: string) => ({ id, status: "READY", name: "Synthetic", iban }),
+    getBalances: async () => [{ amountCents: 5000, type: "interimBooked", referenceDate: null }],
+    getTransactions: async () => [],
+  } as unknown as ReturnType<typeof createGoCardlessClient>;
+  await syncBankConnection(original, adapter);
+  providerAccountId = "changed-account";
+  iban = "IT60X0542811101000000333333";
+  await expect(syncBankConnection(replacement, adapter)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("mapping is required") });
+  expect(database.prepare("SELECT COUNT(*) AS n, SUM(balance_cents) AS cash FROM accounts").get())
+    .toEqual({ n: 1, cash: 5000 });
+  expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_links WHERE connection_id = ?").get(replacement)!.n).toBe(0);
+  await mapBankAccount(replacement, providerAccountId, null, adapter);
+  await syncBankConnection(replacement, adapter);
+  expect(database.prepare("SELECT COUNT(*) AS n, SUM(balance_cents) AS cash FROM accounts").get())
+    .toEqual({ n: 2, cash: 10000 });
 });

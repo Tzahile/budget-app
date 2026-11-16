@@ -149,7 +149,21 @@ choices and booked balances. `POST /api/bank/connections/:id/mappings` accepts
 `accountId: null` to explicitly create a separate account. The server obtains
 and hashes the bank's stable account identity; the browser cannot assert a hash
 or provide credentials. The choice and connection revision guard commit in a
-single database transaction. The mapping is retained across provider session
-reconnects. Failed sync attempts record a safe audit entry only after their
+single database transaction. Reconnect with the same stable identity reuses the
+local account. Any unfamiliar identity requires an explicit mapping when an
+active household EUR checking or savings account exists, including when every
+current account already has a mapping. Choose a separate account only when it
+holds distinct funds. Replacing the identity on an already-linked account,
+including a switch of providers for the same bank account, requires a verified
+history cutover and is currently unsupported.
+
+A sync rejects the entire snapshot when new booked bank entries overlap the
+dates of unresolved statement bookings on the same account. Shared stable IDs
+with identical booking details are deduplicated. Otherwise review statement
+history before proceeding. If the statement already contains the verified
+provider IDs, include those IDs when establishing a reconciled ledger. Sync
+cannot use descriptions, dates, or amounts to decide which rows to merge.
+
+Failed sync attempts record a safe audit entry only after their
 financial snapshot has rolled back. Account-history start and gap flags are
 non-secret metadata but should not be interpreted as complete lifetime history.

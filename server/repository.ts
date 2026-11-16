@@ -48,6 +48,19 @@ import { nextTransactionCursor, transactionPageQuery, type TransactionFilters, t
 
 type Row = Record<string, unknown>;
 
+const eligibleBankAccountQuery = `SELECT 1 FROM accounts WHERE is_active = 1 AND is_demo = 0
+  AND type IN ('checking', 'savings') AND currency = 'EUR'`;
+const bankMappingRequired = "Bank account mapping is required before first sync";
+const bankStatementOverlap = "Bank history overlaps unreconciled statement bookings; review the account before syncing";
+const requireOneBankChange = [
+  "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END",
+  "DELETE FROM bank_sync_guards",
+] as const;
+const requireNoEligibleBankAccounts: MigrationStatement[] = [
+  `INSERT INTO bank_sync_guards (claim) SELECT NOT EXISTS (${eligibleBankAccountQuery})`,
+  "DELETE FROM bank_sync_guards",
+];
+
 export type BankConnectionStatus = "connected" | "reauth_required" | "disconnected" | "error";
 export interface BankConnection {
   id: string;
@@ -158,7 +171,7 @@ export async function getBankConnectionForSync(id: string): Promise<{
 /** Stage account identity/link statements so a complete sync commits atomically. */
 async function prepareLinkedBankAccount(input: {
   connectionId: string; providerAccountId: string; name: string; identityHash?: string;
-}): Promise<{ accountId: string; statements: MigrationStatement[] }> {
+}): Promise<{ accountId: string; statements: MigrationStatement[]; createsAccount: boolean }> {
   await ensureSchema();
   if (!input.providerAccountId || input.providerAccountId.length > 200 || !input.name.trim() || input.name.length > 200 ||
       (input.identityHash !== undefined && !/^[a-f0-9]{64}$/.test(input.identityHash))) {
@@ -170,22 +183,12 @@ async function prepareLinkedBankAccount(input: {
   const existing = await one("SELECT account_id FROM bank_account_links WHERE connection_id = ? AND provider_account_id = ?", [input.connectionId, input.providerAccountId]);
   const identity = input.identityHash ? await one("SELECT account_id FROM bank_account_identities WHERE provider = ? AND institution_id = ? AND identity_hash = ?", [connection.provider, connection.institutionId, input.identityHash]) : null;
   if (existing && identity && existing.account_id !== identity.account_id) throw conflict("Bank account identity changed; review the connection");
-  // Previously linked accounts without a stable identity cannot safely be guessed
-  // during reconnect. Fail closed rather than adding the same cash twice.
-  if (!existing && !identity) {
-    // Never create a second household balance over a manually maintained bank
-    // account. Require an explicit owner decision: use that account or create
-    // a separate one. Cash accounts are unrelated to bank balances.
-    const unmapped = await one(`SELECT 1 FROM accounts a WHERE a.is_active = 1 AND a.is_demo = 0
-      AND a.type IN ('checking', 'savings')
-      AND NOT EXISTS (SELECT 1 FROM bank_account_identities i WHERE i.account_id = a.id)
-      LIMIT 1`, []);
-    if (unmapped) throw conflict("Bank account mapping is required before first sync");
-    const legacy = await one(`SELECT 1 FROM bank_account_links l JOIN bank_connections c ON c.id = l.connection_id
-      WHERE c.provider = ? AND c.institution_id = ? AND NOT EXISTS
-        (SELECT 1 FROM bank_account_identities i WHERE i.account_id = l.account_id AND i.provider = c.provider AND i.institution_id = c.institution_id) LIMIT 1`, [connection.provider, connection.institutionId]);
-    if (legacy && input.identityHash) throw conflict("Existing bank account identity needs verification before reconnecting");
+  if (existing && input.identityHash && !identity) {
+    const bound = await one("SELECT 1 FROM bank_account_identities WHERE account_id = ?", [String(existing.account_id)]);
+    if (bound) throw conflict("Bank account identity changed; review the connection");
   }
+  const createsAccount = !existing && !identity;
+  if (createsAccount && await one(eligibleBankAccountQuery, [])) throw conflict(bankMappingRequired);
   const accountId = String(existing?.account_id ?? identity?.account_id ?? crypto.randomUUID());
   if (existing || identity) {
     const account = await one("SELECT is_active, currency FROM accounts WHERE id = ?", [accountId]);
@@ -193,7 +196,7 @@ async function prepareLinkedBankAccount(input: {
   }
   const now = new Date().toISOString();
   const statements: MigrationStatement[] = [];
-  if (!existing && !identity) statements.push({
+  if (createsAccount) statements.push({
     sql: "INSERT INTO accounts (id, name, type, currency, balance_cents, is_active, created_at, updated_at) VALUES (?, ?, 'checking', 'EUR', 0, 1, ?, ?)",
     args: [accountId, input.name.trim(), now, now],
   });
@@ -210,7 +213,7 @@ async function prepareLinkedBankAccount(input: {
       WHERE id <> ? AND provider = ? AND institution_id = ? AND id IN (SELECT connection_id FROM bank_account_links WHERE account_id = ?)
       AND status = 'connected'`, args: [now, input.connectionId, connection.provider, connection.institutionId, accountId],
   });
-  return { accountId, statements };
+  return { accountId, statements, createsAccount };
 }
 
 /** A retry returns the existing linked account; production sync requires stable identity. */
@@ -218,7 +221,9 @@ export async function createLinkedBankAccount(input: {
   connectionId: string; providerAccountId: string; name: string; identityHash?: string;
 }): Promise<string> {
   const plan = await prepareLinkedBankAccount(input);
-  if (plan.statements.length) await db.batch(plan.statements);
+  if (plan.statements.length) {
+    await db.batch(plan.createsAccount ? [...requireNoEligibleBankAccounts, ...plan.statements] : plan.statements);
+  }
   return plan.accountId;
 }
 
@@ -320,15 +325,18 @@ export async function applyBankConnectionSnapshot(input: {
     "DELETE FROM bank_sync_guards",
   ];
   const stagedTransfers: TransferDetectionTransaction[] = [];
+  let createsAccount = false;
   let importedCount = 0; let duplicateCount = 0;
   try {
     for (const account of input.accounts) {
       if (!Number.isSafeInteger(account.balanceCents) || account.coverageFrom > account.coverageThrough ||
         !/^\d{4}-\d{2}-\d{2}$/.test(account.coverageFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(account.coverageThrough)) throw conflict("Bank snapshot range or balance is invalid");
       const link = await prepareLinkedBankAccount({ connectionId: input.connectionId, ...account });
+      createsAccount ||= link.createsAccount;
       statements.push(...link.statements);
       const result = await ingestTransactions({ accountId: link.accountId, source: "open_banking", filename: "Open Banking sync",
-        transactions: account.transactions, bankConnectionId: input.connectionId, bankBalanceCents: account.balanceCents, deferredStatements: statements, deferredTransfers: stagedTransfers });
+        transactions: account.transactions, bankConnectionId: input.connectionId, bankBalanceCents: account.balanceCents,
+        bankCoverageFrom: account.coverageFrom, bankCoverageThrough: account.coverageThrough, deferredStatements: statements, deferredTransfers: stagedTransfers });
       importedCount += result.importedCount; duplicateCount += result.duplicateCount;
       // Record coverage with the snapshot, never separately. A lapse beyond the
       // provider's 90-day window creates a permanent, visible history-gap flag.
@@ -342,7 +350,7 @@ export async function applyBankConnectionSnapshot(input: {
         args: [link.accountId, account.coverageFrom, account.coverageThrough, new Date().toISOString()],
       });
     }
-    await db.batch(statements);
+    await db.batch(createsAccount ? [...requireNoEligibleBankAccounts, ...statements] : statements);
   } catch (error) {
     // A staged rejected import never committed. Publish a separate durable,
     // non-sensitive failed run only after the entire financial batch rolled back.
@@ -355,7 +363,8 @@ export async function applyBankConnectionSnapshot(input: {
       args: [importId, now, now, input.connectionId] });
     // Only known, fixed validation errors may be forwarded. SQLite details
     // can contain schema identifiers and are never safe HTTP error text.
-    if (error instanceof Error && error.message === "amount must be non-zero integer cents") {
+    if (error instanceof Error && (error.message === "amount must be non-zero integer cents" ||
+        error.message === bankMappingRequired || error.message === bankStatementOverlap)) {
       throw Object.assign(error, { importId });
     }
     throw Object.assign(conflict("Bank snapshot rejected; no financial changes applied"), { importId });
@@ -576,6 +585,8 @@ export async function ingestTransactions(input: {
   /** Internal bank sync context; verified by ingestBankAccountTransactions. */
   bankConnectionId?: string;
   bankBalanceCents?: number;
+  bankCoverageFrom?: string;
+  bankCoverageThrough?: string;
   /** Internal staging only; never supplied by an HTTP client. */
   deferredStatements?: MigrationStatement[];
   deferredTransfers?: TransferDetectionTransaction[];
@@ -608,8 +619,8 @@ export async function ingestTransactions(input: {
   const existingRows = new Map<string, Row>();
   for (const values of chunk(identities, 500)) {
     const result = await db.execute({
-      sql: `SELECT id, import_identity, account_id, date, amount_cents, description, status,
-        bank_connection_id, transfer_group_id FROM transactions
+      sql: `SELECT id, import_identity, account_id, date, amount_cents, description, kind, status,
+        bank_connection_id, transfer_group_id, voided_at FROM transactions
         WHERE import_identity IN (${values.map(() => "?").join(", ")})`,
       args: values,
     });
@@ -648,7 +659,9 @@ export async function ingestTransactions(input: {
       }
       if (previous.date === transaction.occurredOn && Number(previous.amount_cents) === transaction.amountCents &&
           previous.description === transaction.description && previous.status === transaction.status) continue;
-      if (previous.transfer_group_id !== null) throw conflict("A confirmed transfer needs review before bank revision");
+      if (previous.transfer_group_id !== null || previous.voided_at !== null) {
+        throw conflict("A classified or voided transaction needs review before bank revision");
+      }
       bankRevisions.push({ transaction, previous });
     }
   }
@@ -700,13 +713,52 @@ export async function ingestTransactions(input: {
   }));
   input.deferredTransfers?.push(...acceptedForDetection);
   if (input.bankConnectionId) {
+    // A provider window can overlap statement history even when the two
+    // sources report different booking dates, amounts, or descriptions.
+    // Shared stable IDs were validated above.
+    const newBookedDates = assessments
+      .filter(({ decision, transaction }) => decision === "accepted" && transaction.status !== "pending")
+      .map(({ transaction }) => transaction.occurredOn);
+    newBookedDates.push(...bankRevisions
+      .filter(({ transaction, previous }) => transaction.status === "cleared" && previous.status !== "cleared")
+      .map(({ transaction }) => transaction.occurredOn));
+    if (newBookedDates.length) {
+      newBookedDates.sort();
+      const firstDate = newBookedDates[0];
+      const from = input.bankCoverageFrom && input.bankCoverageFrom < firstDate ? input.bankCoverageFrom : firstDate;
+      const lastDate = newBookedDates[newBookedDates.length - 1];
+      const through = input.bankCoverageThrough && input.bankCoverageThrough > lastDate ? input.bankCoverageThrough : lastDate;
+      const statementBookings = `SELECT import_identity FROM transactions t
+        WHERE t.account_id = ? AND t.source = 'import' AND t.bank_connection_id IS NULL
+          AND t.status = 'cleared' AND t.voided_at IS NULL AND t.date BETWEEN ? AND ?`;
+      const args: [string, string, string] = [input.accountId, from, through];
+      const statementsAtRisk = await db.execute({ sql: statementBookings, args });
+      if (statementsAtRisk.rows.some(({ import_identity }) => !existing.has(String(import_identity)))) {
+        throw conflict(bankStatementOverlap);
+      }
+      // Recheck inside the write batch after its ingestion items are staged.
+      // A concurrent import may have added a new unresolved statement booking.
+      plan.statements.push({
+        sql: `INSERT INTO bank_sync_guards (claim) SELECT NOT EXISTS (
+          SELECT 1 FROM (${statementBookings}) tabular WHERE NOT EXISTS (
+            SELECT 1 FROM ingestion_items item WHERE item.import_id = ?
+              AND item.status = 'duplicate' AND item.import_identity = tabular.import_identity
+          ))`,
+        args: [...args, importId],
+      }, "DELETE FROM bank_sync_guards");
+    }
     for (const { transaction, previous } of bankRevisions) {
       plan.statements.push({
         sql: `UPDATE transactions SET date = ?, amount_cents = ?, description = ?, kind = ?, status = ?,
-          raw_metadata = ?, updated_at = ?, bank_connection_id = ? WHERE import_identity = ? AND bank_connection_id = ?`,
+          raw_metadata = ?, updated_at = ?, bank_connection_id = ?
+          WHERE id = ? AND import_identity = ? AND bank_connection_id = ? AND account_id = ?
+            AND date = ? AND amount_cents = ? AND description = ? AND kind = ? AND status = ?
+            AND transfer_group_id IS NULL AND voided_at IS NULL`,
         args: [transaction.occurredOn, transaction.amountCents, transaction.description, transaction.kind,
-          transaction.status ?? "cleared", transaction.metadataJson, now, input.bankConnectionId, transaction.importIdentity, String(previous.bank_connection_id)],
-      });
+          transaction.status ?? "cleared", transaction.metadataJson, now, input.bankConnectionId,
+          String(previous.id), transaction.importIdentity, String(previous.bank_connection_id), input.accountId,
+          String(previous.date), Number(previous.amount_cents), String(previous.description), String(previous.kind), String(previous.status)],
+      }, ...requireOneBankChange);
       const previousCounted = previous.status === "cleared" ? Number(previous.amount_cents) : 0;
       const nextCounted = transaction.status === "cleared" ? transaction.amountCents : 0;
       if (nextCounted !== previousCounted) plan.statements.push({
