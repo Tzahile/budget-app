@@ -146,6 +146,9 @@ describe("bank snapshot accounting conflicts", () => {
       transactions: [booking, { ...booking, amountCents: -800, description: "Additional booking", externalId: "additional-id" }] }] };
     expect(await applyBankConnectionSnapshot(snapshot)).toMatchObject({ importedCount: 1, duplicateCount: 1 });
     expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2 })).toMatchObject({ importedCount: 0, duplicateCount: 2 });
+    await expect(ingestTransactions({ accountId, source: "xlsx", filename: "Synthetic statement",
+      transactions: [{ ...booking, amountCents: -401 }] }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
     expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE account_id = ?").get(accountId)!.n).toBe(2);
     expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
   });

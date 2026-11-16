@@ -846,8 +846,12 @@ function statementOverlapCheck(accountId: string, assessments: ReturnType<typeof
   const sql = `SELECT 1 FROM json_each(?) AS statement
     WHERE EXISTS (
       SELECT 1 FROM transactions t
-      WHERE t.account_id = ? AND t.source = 'import' AND t.bank_connection_id IS NOT NULL
+      WHERE t.account_id = ? AND t.source = 'import'
         AND t.import_identity = json_extract(statement.value, '$.id')
+        AND (t.bank_connection_id IS NOT NULL OR EXISTS (
+          SELECT 1 FROM bank_account_sync_coverage c WHERE c.account_id = t.account_id
+            AND t.date BETWEEN c.first_date AND c.last_date
+        ))
         AND (json_extract(statement.value, '$.accepted') = 1 OR t.voided_at IS NOT NULL
           OR t.date <> json_extract(statement.value, '$.date')
           OR t.amount_cents <> json_extract(statement.value, '$.amount')
