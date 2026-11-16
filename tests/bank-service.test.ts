@@ -2,18 +2,67 @@ import { db } from "../server/db.ts";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTestSqlite } from "./support/val-sqlite.ts";
-import { createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections } from "../server/repository.ts";
-import { disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
+import { createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections, createBankConsentAttempt, hashBankConsentState } from "../server/repository.ts";
+import { completeBankConsent, disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
 import { createGoCardlessClient } from "../server/gocardless.ts";
 
 let database: DatabaseSync;
-function useGoCardlessEnvironment() {
-  const values: Record<string, string> = { BUDGET_APP_BANK_PROVIDER: "gocardless-bank-account-data", BUDGET_APP_BANK_SYNC_VERIFIED: "true", BUDGET_APP_BBVA_ITALY_INSTITUTION_ID: "it-synthetic", BUDGET_APP_GOCARDLESS_SECRET_ID: "synthetic", BUDGET_APP_GOCARDLESS_SECRET_KEY: "synthetic" };
+function useGoCardlessEnvironment(overrides: Record<string, string> = {}) {
+  const values: Record<string, string> = { BUDGET_APP_BANK_PROVIDER: "gocardless-bank-account-data", BUDGET_APP_BANK_SYNC_VERIFIED: "true", BUDGET_APP_BBVA_ITALY_INSTITUTION_ID: "it-synthetic", BUDGET_APP_GOCARDLESS_SECRET_ID: "synthetic", BUDGET_APP_GOCARDLESS_SECRET_KEY: "synthetic", ...overrides };
   Object.assign(globalThis, { Deno: { env: { get: (name: string) => values[name] } } });
 }
 beforeAll(() => { database = new DatabaseSync(":memory:"); useTestSqlite(database); useGoCardlessEnvironment(); });
 afterAll(() => database.close());
-beforeEach(useGoCardlessEnvironment);
+beforeEach(() => useGoCardlessEnvironment());
+
+describe("bank consent callback", () => {
+  const origin = "https://budget.example";
+  const ownerUsername = "synthetic-owner";
+
+  async function storeAttempt() {
+    const state = (crypto.randomUUID() + crypto.randomUUID()).replaceAll("-", "");
+    await createBankConsentAttempt({
+      stateHash: await hashBankConsentState(state), ownerUsername,
+      provider: "gocardless-bank-account-data", institutionId: "it-synthetic", institutionName: "Synthetic",
+      providerRequisitionId: "synthetic-consent", redirectUri: `${origin}/api/bank/callback`,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    return { state, origin, ownerUsername, code: "synthetic-code" };
+  }
+
+  it.each([
+    ["verification disabled", "BUDGET_APP_BANK_SYNC_VERIFIED", "false"],
+    ["provider switched", "BUDGET_APP_BANK_PROVIDER", "enable-banking"],
+    ["institution changed", "BUDGET_APP_BBVA_ITALY_INSTITUTION_ID", "other-synthetic"],
+    ["credential removed", "BUDGET_APP_GOCARDLESS_SECRET_KEY", ""],
+  ])("blocks a pending callback when %s", async (_case, key, value) => {
+    const input = await storeAttempt();
+    const before = await listBankConnections();
+    useGoCardlessEnvironment({ [key]: value });
+    const exchangeAuthorization = vi.fn();
+    const getRequisition = vi.fn();
+    const adapter = { providerId: "gocardless-bank-account-data", exchangeAuthorization, getRequisition } as unknown as ReturnType<typeof createGoCardlessClient>;
+    await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 503 });
+    expect(exchangeAuthorization).not.toHaveBeenCalled();
+    expect(getRequisition).not.toHaveBeenCalled();
+    expect(await listBankConnections()).toEqual(before);
+  });
+
+  it("cleans up the exchange if the gate closes before the connection is stored", async () => {
+    const input = await storeAttempt();
+    const before = await listBankConnections();
+    const exchangeAuthorization = vi.fn(async () => {
+      useGoCardlessEnvironment({ BUDGET_APP_BANK_SYNC_VERIFIED: "false" });
+      return { id: "synthetic-returned-session", institutionId: "it-synthetic", status: "LN", accounts: ["synthetic-account"] };
+    });
+    const deleteRequisition = vi.fn(async () => {});
+    const adapter = { providerId: "gocardless-bank-account-data", exchangeAuthorization, deleteRequisition } as unknown as ReturnType<typeof createGoCardlessClient>;
+    await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 503 });
+    expect(exchangeAuthorization).toHaveBeenCalledExactlyOnceWith("synthetic-code");
+    expect(deleteRequisition).toHaveBeenCalledExactlyOnceWith("synthetic-returned-session");
+    expect(await listBankConnections()).toEqual(before);
+  });
+});
 
 describe("manual bank sync", () => {
   it("validates all provider accounts before writing, then replays idempotently and revokes", async () => {

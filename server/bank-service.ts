@@ -103,10 +103,16 @@ export async function completeBankConsent(input: {
   });
   if (!attempt) throw safeError(400, "Bank consent expired or was already used");
   const provider = attempt.provider;
+  if (configuredInstitutionId(provider) !== attempt.institutionId) {
+    throw safeError(503, "Bank consent is disabled or not verified");
+  }
   adapter = adapter.providerId === provider ? adapter : clientFor(provider);
   if (adapter.exchangeAuthorization && !input.code) throw safeError(400, "Bank authorization code is required");
   const requisition = adapter.exchangeAuthorization ? await adapter.exchangeAuthorization(input.code!) : await adapter.getRequisition(attempt.providerRequisitionId);
   try {
+    if (configuredInstitutionId(provider) !== attempt.institutionId) {
+      throw safeError(503, "Bank consent is disabled or not verified");
+    }
     if (requisition.status !== "LN" || requisition.institutionId !== attempt.institutionId || !requisition.accounts.length ||
       (requisition.expiresAt && requisition.expiresAt <= new Date().toISOString())) throw safeError(409, "Bank consent is incomplete; reconnect to continue");
     await createBankConnection({ provider, providerConnectionId: requisition.id, institutionId: attempt.institutionId,
