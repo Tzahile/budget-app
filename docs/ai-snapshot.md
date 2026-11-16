@@ -105,14 +105,14 @@ The preview displays that exact string, describes aggregate sensitivity and
 Google Gemini as the external provider, and separates advice from accounting
 facts. It remains fixed until another preview is requested. A checkbox approves
 only the displayed payload; a separate **Confirm and send to Gemini** action
-submits `{ "confirmed": true, "payload": "<the displayed JSON string>" }` to
-`POST /api/ai/advice`. The endpoint requires explicit boolean confirmation,
-rejects extra request fields, validates the nested snapshot fail-closed, and
-requires its serialization to exactly match the supplied string. It does not
-recompute current dashboard figures before sending. This is a stateless
-round-trip, not a signed assertion that the household's balances remain
-unchanged after preview. The allowlisted user can submit validated aggregate
-values; none can alter accounting state.
+submits the displayed JSON string as `payload`, its opaque `previewProof`,
+and `confirmed: true` to `POST /api/ai/advice`. The server verifies the proof
+against the exact bytes, authenticated OAuth session, and request origin. The
+proof expires after five minutes or when the OAuth session expires, whichever
+comes first. The OAuth credential and proof stay outside the provider request.
+The endpoint rejects extra fields and validates the canonical snapshot before
+sending. It sends the approved snapshot even if the household's balances change
+after preview. A new preview is required after expiry.
 
 **Production keeps sending disabled:** the HTTP entrypoint injects no advisor
 into `createAiRoutes`. Preview returns `available: false` with the Italy/free-only
@@ -158,9 +158,16 @@ omitted. Every edit, omission, reset or new preview clears consent and prior adv
 writing accounting state. The original calculated JSON is also available in a
 separate disclosure. Advisory results based on edits are explicitly labelled.
 
-The existing authenticated confirmation endpoint accepts either validated schema,
-passes exactly its approved JSON to the provider and never refreshes or mutates
-ledger data. Production external sending remains hard-disabled under the same
+**Preview edited payload** submits the exact edited JSON and the original
+calculated preview with its proof to `POST /api/ai/preview/edited`. This
+same-origin request verifies the original proof and validates the edited schema
+and months before issuing a separate proof for the edited bytes. It makes no
+provider call. The confirmation checkbox remains disabled until this preview
+is issued, and editing or resetting clears the edited proof and consent.
+The authenticated confirmation endpoint accepts either validated schema with
+its matching proof. Only the approved JSON reaches the provider. The preview
+and confirmation routes do not refresh or mutate ledger data after the
+calculated preview is issued. Production external sending remains hard-disabled under the same
 Italy/free-only blocker, including for valid edited payloads. Synthetic reducer,
 serializer, route, mocked-provider and HTTP tests exercise omission semantics,
 fresh consent, exact bytes and unchanged accounting state. These checks do not

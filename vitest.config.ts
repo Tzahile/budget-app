@@ -11,6 +11,7 @@ export default defineConfig({
       "npm:hono@4/html": "hono/html",
       "npm:hono@4/jsx": "hono/jsx",
       "https://esm.town/v/std/sqlite/main.ts": fileURLToPath(new URL("./tests/support/val-sqlite.ts", import.meta.url)),
+      "https://esm.town/v/std/oauth/crypto.ts": fileURLToPath(new URL("./tests/support/oauth-middleware.ts", import.meta.url)),
       "https://esm.town/v/std/oauth/middleware.ts": fileURLToPath(new URL("./tests/support/oauth-middleware.ts", import.meta.url)),
       "https://esm.town/v/std/utils/index.ts": fileURLToPath(new URL("./tests/support/val-utils.ts", import.meta.url)),
     },

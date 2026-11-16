@@ -18,18 +18,22 @@ export async function aiRequest<T>(path: string, body: unknown): Promise<T> {
 /** No mount/load effect: both preview and external send require separate actions. */
 export function AskAi({ request = aiRequest }: { request?: typeof aiRequest }) {
   const [preview, setPreview] = useState<AiPreview | null>(null);
+  const [editedPreview, setEditedPreview] = useState<Pick<AiPreview, "payload" | "previewProof"> | null>(null);
   const [editor, dispatch] = useReducer(aiEditorReducer, { draft: null, confirmed: false });
   const { draft, confirmed } = editor;
   let outbound: ReturnType<typeof buildAiDraftPayload> | null = null;
   let draftError = "";
   try { if (draft) outbound = buildAiDraftPayload(draft); }
   catch { draftError = "Included amounts must be safe whole integer cents. Correct the highlighted input or omit it before sending."; }
+  const approvedPreview = outbound?.edited
+    ? (editedPreview?.payload === outbound.payload ? editedPreview : null)
+    : (outbound?.payload === preview?.payload ? preview : null);
   const [busy, setBusy] = useState(false);
   const [advice, setAdvice] = useState<AiAdvice | null>(null);
   const [error, setError] = useState("");
 
   async function prepare() {
-    setBusy(true); setError(""); setPreview(null); dispatch({ type: "clear" }); setAdvice(null);
+    setBusy(true); setError(""); setPreview(null); setEditedPreview(null); dispatch({ type: "clear" }); setAdvice(null);
     try {
       const result = await request<AiPreview>("/api/ai/preview", {});
       dispatch({ type: "load", payload: result.payload });
@@ -39,20 +43,34 @@ export function AskAi({ request = aiRequest }: { request?: typeof aiRequest }) {
     finally { setBusy(false); }
   }
 
+  async function prepareEdited() {
+    if (!preview || !outbound?.edited || busy) return;
+    setBusy(true); setError(""); setAdvice(null); setEditedPreview(null);
+    dispatch({ type: "confirm", confirmed: false });
+    try {
+      const result = await request<Pick<AiPreview, "payload" | "previewProof">>("/api/ai/preview/edited", {
+        originalPayload: preview.payload, originalProof: preview.previewProof, payload: outbound.payload,
+      });
+      if (result.payload !== outbound.payload) throw new Error("The edited preview changed. Review the payload again.");
+      setEditedPreview(result);
+    } catch (error) { setError(error instanceof Error ? error.message : "Could not prepare the edited preview."); }
+    finally { setBusy(false); }
+  }
+
   async function send() {
-    if (!preview?.available || !confirmed || !outbound || busy) return;
+    if (!preview?.available || !confirmed || !approvedPreview || busy) return;
     setBusy(true); setError(""); setAdvice(null);
     // Consume consent before awaiting, so failures cannot automatically resend.
     dispatch({ type: "confirm", confirmed: false });
     try {
-      const result = await request<AiAdviceResponse>("/api/ai/advice", { payload: outbound.payload, confirmed: true });
+      const result = await request<AiAdviceResponse>("/api/ai/advice", { payload: approvedPreview.payload, previewProof: approvedPreview.previewProof, confirmed: true });
       setAdvice(result.advice);
     } catch (error) { setError(error instanceof Error ? error.message : "AI advice is unavailable."); }
     finally { setBusy(false); }
   }
 
   function edit(next: AiPayloadDraft) {
-    dispatch({ type: "change", draft: next }); setAdvice(null); setError("");
+    dispatch({ type: "change", draft: next }); setEditedPreview(null); setAdvice(null); setError("");
   }
 
   return <section aria-labelledby="ask-ai-title" className="mt-7 min-w-0 rounded-2xl border border-stone-200 bg-white p-5">
@@ -75,7 +93,7 @@ export function AskAi({ request = aiRequest }: { request?: typeof aiRequest }) {
             <label className="mt-3 flex items-start gap-2 text-sm"><input type="checkbox" checked={projection.included} onChange={(event) => edit({ ...draft, projections: draft.projections.map((item, position) => position === index ? { ...item, included: event.target.checked } : item) })} className="mt-1 h-4 w-4 shrink-0" /><span>Include {projection.month}</span></label>
             {projection.included && <div className="mt-3 space-y-3">{PROJECTION_METRICS.map((key) => <MetricControl key={key} label={`${projection.month} ${metricLabels[key]}`} value={projection.metrics[key]} calculated={draft.original.projectionMonths[index][key]} onChange={(value) => edit({ ...draft, projections: draft.projections.map((item, position) => position === index ? { ...item, metrics: { ...item.metrics, [key]: value } } : item) })} />)}</div>}
           </details>)}
-          <button type="button" onClick={() => { dispatch({ type: "reset" }); setAdvice(null); setError(""); }} className="rounded-lg border border-stone-300 px-3 py-2 text-sm">Reset to calculated values</button>
+          <button type="button" onClick={() => { dispatch({ type: "reset" }); setEditedPreview(null); setAdvice(null); setError(""); }} className="rounded-lg border border-stone-300 px-3 py-2 text-sm">Reset to calculated values</button>
         </fieldset>
       </details>
       <p role="status" className="mt-3 text-sm font-medium">{!outbound ? "Payload invalid: correct or omit included values before approval." : outbound.edited ? "Edited advisory assumptions: these are not calculated accounting facts." : "Calculated snapshot: no advisory values changed."}</p>
@@ -84,15 +102,16 @@ export function AskAi({ request = aiRequest }: { request?: typeof aiRequest }) {
       {outbound && <pre aria-label="Exact outbound financial payload" tabIndex={0} className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-stone-100 p-3 text-xs leading-relaxed">{outbound.payload}</pre>}
       <details className="mt-3 min-w-0 text-sm"><summary className="cursor-pointer">Original calculated snapshot</summary><pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-stone-100 p-3 text-xs">{preview.payload}</pre></details>
       {!preview.available && <p role="status" className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-900">{preview.disabledReason}</p>}
+      {outbound?.edited && !approvedPreview && <button type="button" disabled={busy} onClick={() => void prepareEdited()} className="mt-4 rounded-xl border border-green-800 px-4 py-3 text-sm font-medium text-green-900 disabled:opacity-50">Preview edited payload</button>}
       <label className="mt-4 flex items-start gap-3 text-sm text-stone-700">
-        <input type="checkbox" checked={confirmed} disabled={busy || !preview.available || !outbound} onChange={(event) => dispatch({ type: "confirm", confirmed: event.target.checked })} className="mt-1 h-4 w-4 shrink-0" />
+        <input type="checkbox" checked={confirmed} disabled={busy || !preview.available || !approvedPreview} onChange={(event) => dispatch({ type: "confirm", confirmed: event.target.checked })} className="mt-1 h-4 w-4 shrink-0" />
         <span>I approve sending exactly this financial payload to Google Gemini for optional advice.</span>
       </label>
       <div className="mt-4 flex flex-wrap gap-3">
-        <button type="button" disabled={busy || !confirmed || !preview.available || !outbound} onClick={() => void send()} className="rounded-xl bg-green-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Requesting advice…" : "Confirm and send to Gemini"}</button>
-        <button type="button" disabled={busy} onClick={() => { setPreview(null); dispatch({ type: "clear" }); setAdvice(null); setError(""); }} className="rounded-xl border border-stone-200 px-4 py-3 text-sm">Cancel</button>
+        <button type="button" disabled={busy || !confirmed || !preview.available || !approvedPreview} onClick={() => void send()} className="rounded-xl bg-green-900 px-4 py-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Requesting advice…" : "Confirm and send to Gemini"}</button>
+        <button type="button" disabled={busy} onClick={() => { setPreview(null); setEditedPreview(null); dispatch({ type: "clear" }); setAdvice(null); setError(""); }} className="rounded-xl border border-stone-200 px-4 py-3 text-sm">Cancel</button>
       </div>
-      <p className="mt-3 text-xs text-stone-500">Every edit or reset clears approval and previous advice. Cancel closes this request without sending.</p>
+      <p className="mt-3 text-xs text-stone-500">Every edit or reset clears approval and previous advice. Approval expires five minutes after preview.</p>
     </div>}
     {advice && <aside aria-label="AI recommendations" className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
       <h3 className="font-semibold text-amber-900">AI recommendations — advisory, not accounting facts</h3>

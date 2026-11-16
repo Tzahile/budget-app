@@ -5,6 +5,7 @@ export const AI_DISCLOSURE = "Optional advice from an external AI provider (Goog
 
 export interface AiPreview {
   readonly payload: string;
+  readonly previewProof: string;
   readonly disclosure: string;
   readonly available: boolean;
   readonly disabledReason: string | null;
