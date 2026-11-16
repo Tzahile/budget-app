@@ -104,6 +104,15 @@ export async function completeBankConsent(input: {
   if (!attempt) throw safeError(400, "Bank consent expired or was already used");
   const provider = attempt.provider;
   if (configuredInstitutionId(provider) !== attempt.institutionId) {
+    // A GoCardless requisition can already be authorized before the callback.
+    if (provider === "gocardless-bank-account-data") {
+      const boundAdapter = adapter.providerId === provider ? adapter : clientFor(provider);
+      try {
+        await boundAdapter.deleteRequisition(attempt.providerRequisitionId);
+      } catch {
+        // Keep the gate response safe even if revocation fails.
+      }
+    }
     throw safeError(503, "Bank consent is disabled or not verified");
   }
   adapter = adapter.providerId === provider ? adapter : clientFor(provider);

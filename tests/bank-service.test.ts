@@ -6,6 +6,7 @@ import { migrateDatabase } from "../server/migrations.ts";
 import { confirmBankAccountMapping, createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections, createBankConsentAttempt, hashBankConsentState } from "../server/repository.ts";
 import { completeBankConsent, disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
 import { createGoCardlessClient } from "../server/gocardless.ts";
+import type { BankProviderClient } from "../server/bank-provider.ts";
 
 let database: DatabaseSync;
 function useGoCardlessEnvironment(overrides: Record<string, string> = {}) {
@@ -24,12 +25,13 @@ describe("bank consent callback", () => {
   const origin = "https://budget.example";
   const ownerUsername = "synthetic-owner";
 
-  async function storeAttempt() {
+  async function storeAttempt(provider = "gocardless-bank-account-data") {
     const state = (crypto.randomUUID() + crypto.randomUUID()).replaceAll("-", "");
     await createBankConsentAttempt({
       stateHash: await hashBankConsentState(state), ownerUsername,
-      provider: "gocardless-bank-account-data", institutionId: "it-synthetic", institutionName: "Synthetic",
-      providerRequisitionId: "synthetic-consent", redirectUri: `${origin}/api/bank/callback`,
+      provider, institutionId: provider === "enable-banking" ? "BBVA" : "it-synthetic", institutionName: "Synthetic",
+      providerRequisitionId: provider === "enable-banking" ? "synthetic-authorization" : "synthetic-consent",
+      redirectUri: `${origin}/api/bank/callback`,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     return { state, origin, ownerUsername, code: "synthetic-code" };
@@ -46,11 +48,44 @@ describe("bank consent callback", () => {
     useGoCardlessEnvironment({ [key]: value });
     const exchangeAuthorization = vi.fn();
     const getRequisition = vi.fn();
-    const adapter = { providerId: "gocardless-bank-account-data", exchangeAuthorization, getRequisition } as unknown as ReturnType<typeof createGoCardlessClient>;
+    const deleteRequisition = vi.fn();
+    const adapter = { providerId: "gocardless-bank-account-data", exchangeAuthorization, getRequisition, deleteRequisition } as BankProviderClient;
+    await expect(completeBankConsent({ ...input, ownerUsername: "synthetic-outsider" }, adapter)).rejects.toMatchObject({ status: 400 });
+    expect(deleteRequisition).not.toHaveBeenCalled();
+    await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 503 });
+    await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 400 });
+    expect(exchangeAuthorization).not.toHaveBeenCalled();
+    expect(getRequisition).not.toHaveBeenCalled();
+    expect(deleteRequisition).toHaveBeenCalledExactlyOnceWith("synthetic-consent");
+    expect(await listBankConnections()).toEqual(before);
+  });
+
+  it("keeps the gate error when GoCardless revocation fails", async () => {
+    const input = await storeAttempt();
+    useGoCardlessEnvironment({ BUDGET_APP_BANK_SYNC_VERIFIED: "false" });
+    const getRequisition = vi.fn();
+    const deleteRequisition = vi.fn().mockRejectedValue(new Error("synthetic private provider detail"));
+    const adapter = { providerId: "gocardless-bank-account-data", getRequisition, deleteRequisition } as BankProviderClient;
+    await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({
+      status: 503, message: "Bank consent is disabled or not verified",
+    });
+    expect(getRequisition).not.toHaveBeenCalled();
+    expect(deleteRequisition).toHaveBeenCalledExactlyOnceWith("synthetic-consent");
+    expect(await listBankConnections()).toEqual([]);
+  });
+
+  it("leaves Enable Banking authorization unexchanged when the gate closes", async () => {
+    const input = await storeAttempt("enable-banking");
+    useGoCardlessEnvironment({ BUDGET_APP_BANK_PROVIDER: "enable-banking", BUDGET_APP_BANK_SYNC_VERIFIED: "false" });
+    const exchangeAuthorization = vi.fn();
+    const getRequisition = vi.fn();
+    const deleteRequisition = vi.fn();
+    const adapter = { providerId: "enable-banking", exchangeAuthorization, getRequisition, deleteRequisition } as BankProviderClient;
     await expect(completeBankConsent(input, adapter)).rejects.toMatchObject({ status: 503 });
     expect(exchangeAuthorization).not.toHaveBeenCalled();
     expect(getRequisition).not.toHaveBeenCalled();
-    expect(await listBankConnections()).toEqual(before);
+    expect(deleteRequisition).not.toHaveBeenCalled();
+    expect(await listBankConnections()).toEqual([]);
   });
 
   it("cleans up the exchange if the gate closes before the connection is stored", async () => {
