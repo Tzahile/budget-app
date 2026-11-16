@@ -316,8 +316,10 @@ function Activity({ data, revision, onImported, onAdd, onAddTransfer, onTransfer
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [filters, cursor, revision]);
-  const set = (field: keyof ActivityFilters) => (event: FormEvent<HTMLInputElement | HTMLSelectElement>) =>
-    setForm((current) => ({ ...current, [field]: event.currentTarget.value }));
+  const set = (field: keyof ActivityFilters) => (event: FormEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const { value } = event.currentTarget;
+    setForm((current) => ({ ...current, [field]: value }));
+  };
   const apply = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setPage(null); setHistory([]); setFilters({ ...form }); };
   const reset = () => { setForm(emptyActivityFilters); setFilters(emptyActivityFilters); setPage(null); setHistory([]); };
   return <Page title="Activity" subtitle="Income, expenses, and refunds change balances; transfers move money between your own accounts." action="Add transaction" onAction={onAdd}>
@@ -441,7 +443,10 @@ function BankConnections({ onAction, accounts }: { onAction: (path: string, meth
             : <div className="mt-2 flex flex-wrap items-center gap-2"><label className="text-sm">Local account
                 <select aria-label={`Map ${bank.label}`} className="ml-2 rounded-lg border border-stone-300 bg-white px-2 py-2"
                   value={mappingSelection[bank.providerAccountId] ?? ""}
-                  onChange={(event) => setMappingSelection((current) => ({ ...current, [bank.providerAccountId]: event.currentTarget.value }))}>
+                  onChange={(event) => {
+                    const { value } = event.currentTarget;
+                    setMappingSelection((current) => ({ ...current, [bank.providerAccountId]: value }));
+                  }}>
                   <option value="">Select decision</option>
                   {accounts.filter((account) => account.isActive && account.currency === "EUR" && account.type !== "cash")
                     .map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
