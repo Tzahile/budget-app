@@ -52,7 +52,7 @@ const eligibleBankAccountQuery = `SELECT 1 FROM accounts WHERE is_active = 1 AND
   AND type IN ('checking', 'savings') AND currency = 'EUR'`;
 const bankMappingRequired = "Bank account mapping is required before first sync";
 const bankStatementOverlap = "Bank history overlaps unreconciled statement bookings; review the account before syncing";
-const statementBankOverlap = "Statement history overlaps bank bookings; review the account before importing";
+const statementBankOverlap = "Statement history overlaps a bank balance checkpoint or booking; review the account before importing";
 const requireOneBankChange = [
   "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END",
   "DELETE FROM bank_sync_guards",
@@ -831,8 +831,9 @@ export async function ingestTransactions(input: {
 }
 
 /**
- * A statement booking in known bank history must already exist under the
- * same stable ID. Dates establish overlap only, never row identity.
+ * A booked balance already includes activity through its checkpoint date,
+ * even for activity before the requested transaction window. Dates establish
+ * overlap only; the stable ID and booking details establish duplication.
  */
 function statementOverlapCheck(accountId: string, assessments: ReturnType<typeof assessIngestionDuplicates>) {
   const rows = assessments.map(({ transaction, decision }) => ({
@@ -850,7 +851,7 @@ function statementOverlapCheck(accountId: string, assessments: ReturnType<typeof
         AND t.import_identity = json_extract(statement.value, '$.id')
         AND (t.bank_connection_id IS NOT NULL OR EXISTS (
           SELECT 1 FROM bank_account_sync_coverage c WHERE c.account_id = t.account_id
-            AND t.date BETWEEN c.first_date AND c.last_date
+            AND t.date <= c.last_date
         ))
         AND (json_extract(statement.value, '$.accepted') = 1 OR t.voided_at IS NOT NULL
           OR t.date <> json_extract(statement.value, '$.date')
@@ -863,7 +864,7 @@ function statementOverlapCheck(accountId: string, assessments: ReturnType<typeof
       AND (
         EXISTS (
           SELECT 1 FROM bank_account_sync_coverage c WHERE c.account_id = ?
-            AND json_extract(statement.value, '$.date') BETWEEN c.first_date AND c.last_date
+            AND json_extract(statement.value, '$.date') <= c.last_date
         ) OR EXISTS (
           SELECT 1 FROM transactions t
           WHERE t.account_id = ? AND t.source = 'import' AND t.bank_connection_id IS NOT NULL

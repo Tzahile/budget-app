@@ -199,6 +199,23 @@ describe("bank snapshot accounting conflicts", () => {
     expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
   });
 
+  it("protects the booked balance from history before bank coverage and accepts new bookings after it", async () => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic booked checkpoint");
+    await applyBankConnectionSnapshot({ connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [] }] });
+    const importInput = { accountId, source: "csv" as const, filename: "Synthetic statement" };
+    const historical = { occurredOn: "2026-08-30", amountCents: 100, description: "Earlier booking", externalId: "older-id" };
+
+    await expect(ingestTransactions({ ...importInput, transactions: [historical] }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("checkpoint") });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE account_id = ?").get(accountId)!.n).toBe(0);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
+    expect(await ingestTransactions({ ...importInput, transactions: [
+      { ...historical, occurredOn: "2026-10-01", description: "New booking", externalId: "later-id" },
+    ] })).toMatchObject({ importedCount: 1, duplicateCount: 0 });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1100);
+  });
+
   it.each([false, true])("rejects a staged statement after a concurrent bank commit (shared ID %s)", async (sharedId) => {
     const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic bank-first race");
     const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Concurrent bank booking", externalId: "bank-id" };
