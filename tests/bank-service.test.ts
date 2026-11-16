@@ -2,7 +2,7 @@ import { db } from "../server/db.ts";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTestSqlite } from "./support/val-sqlite.ts";
-import { createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections, createBankConsentAttempt, hashBankConsentState } from "../server/repository.ts";
+import { confirmBankAccountMapping, createAccount, createBankConnection, getAppData, getIngestionHistory, listBankConnections, createBankConsentAttempt, hashBankConsentState } from "../server/repository.ts";
 import { completeBankConsent, disconnectBankConnection, mapBankAccount, syncBankConnection } from "../server/bank-service.ts";
 import { createGoCardlessClient } from "../server/gocardless.ts";
 
@@ -236,6 +236,75 @@ it("requires explicit mapping of an existing household account and preserves cas
   database.prepare("UPDATE bank_account_sync_coverage SET first_date = '2020-01-01', last_date = '2020-01-02' WHERE account_id = ?").run(local.id);
   await syncBankConnection(id, adapter);
   expect(database.prepare("SELECT has_gap FROM bank_account_sync_coverage WHERE account_id = ?").get(local.id)).toMatchObject({ has_gap: 1 });
+});
+
+describe("atomic owner-confirmed bank mapping", () => {
+  async function connection(name: string, provider = "gocardless-bank-account-data") {
+    return createBankConnection({ provider, providerConnectionId: name,
+      institutionId: "it-synthetic", institutionName: "Synthetic", countryCode: "IT" });
+  }
+
+  async function localAccount(name: string) {
+    await createAccount({ name, type: "checking", balanceCents: 0 });
+    return String(database.prepare("SELECT id FROM accounts WHERE name = ?").get(name)!.id);
+  }
+
+  it("replays the same concurrent create-separate request without accepting changed identity or choice", async () => {
+    const connectionId = await connection("separate-retry");
+    const input = { connectionId, providerAccountId: "synthetic-separate", identityHash: "a".repeat(64), accountId: null };
+    const before = database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n;
+    const [first, second] = await Promise.all([confirmBankAccountMapping(input), confirmBankAccountMapping(input)]);
+    expect(second).toBe(first);
+    expect(await confirmBankAccountMapping(input)).toBe(first);
+    expect(database.prepare("SELECT COUNT(*) AS n FROM accounts").get()!.n).toBe(Number(before) + 1);
+    expect(database.prepare("SELECT mapping_choice FROM bank_account_links WHERE connection_id = ?").get(connectionId))
+      .toMatchObject({ mapping_choice: "separate" });
+    await expect(confirmBankAccountMapping({ ...input, accountId: first })).rejects.toMatchObject({ status: 409 });
+    await expect(confirmBankAccountMapping({ ...input, identityHash: "b".repeat(64) })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("does not treat an existing-account choice as a create-separate retry", async () => {
+    const connectionId = await connection("existing-retry");
+    const accountId = await localAccount("Synthetic existing choice");
+    const input = { connectionId, providerAccountId: "synthetic-existing", identityHash: "c".repeat(64), accountId };
+    expect(await Promise.all([confirmBankAccountMapping(input), confirmBankAccountMapping(input)])).toEqual([accountId, accountId]);
+    await expect(confirmBankAccountMapping({ ...input, accountId: null })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("only allows one provider to claim the same local account", async () => {
+    const first = await connection("exclusive-first");
+    const second = await connection("exclusive-second", "enable-banking");
+    const accountId = await localAccount("Synthetic exclusive choice");
+    const results = await Promise.allSettled([
+      confirmBankAccountMapping({ connectionId: first, providerAccountId: "first", identityHash: "d".repeat(64), accountId }),
+      confirmBankAccountMapping({ connectionId: second, providerAccountId: "second", identityHash: "e".repeat(64), accountId }),
+    ]);
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results).toContainEqual(expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ status: 409 }) }));
+    expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_links WHERE account_id = ?").get(accountId)!.n).toBe(1);
+    expect(() => database.prepare("INSERT INTO bank_account_identities (provider, institution_id, identity_hash, account_id) VALUES (?, ?, ?, ?)")
+      .run("other-synthetic-provider", "it-synthetic", "f".repeat(64), accountId)).toThrow(/UNIQUE/);
+  });
+
+  it("rejects an account becoming inactive just before the write batch", async () => {
+    const connectionId = await connection("eligibility-race");
+    const accountId = await localAccount("Synthetic account deactivated before mapping");
+    const batch = db.batch.bind(db);
+    const race = vi.spyOn(db, "batch").mockImplementationOnce((statements) => {
+      database.prepare("UPDATE accounts SET is_active = 0 WHERE id = ?").run(accountId);
+      return batch(statements);
+    });
+    try {
+      await expect(confirmBankAccountMapping({
+        connectionId, providerAccountId: "synthetic-inactive", identityHash: "f".repeat(64), accountId,
+      })).rejects.toMatchObject({ status: 409 });
+      expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(connectionId)!.sync_revision).toBe(0);
+      expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_links WHERE connection_id = ?").get(connectionId)!.n).toBe(0);
+      expect(database.prepare("SELECT COUNT(*) AS n FROM bank_account_identities WHERE account_id = ?").get(accountId)!.n).toBe(0);
+    } finally {
+      race.mockRestore();
+    }
+  });
 });
 
 it("persists a real failed import audit ID without partial financial writes", async () => {

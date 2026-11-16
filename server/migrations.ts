@@ -324,6 +324,14 @@ export const migrations: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    version: 16,
+    name: "bank mapping choice and account exclusivity",
+    statements: [
+      "ALTER TABLE bank_account_links ADD COLUMN mapping_choice TEXT CHECK (mapping_choice IN ('existing', 'separate'))",
+      "CREATE UNIQUE INDEX bank_account_identities_account_idx ON bank_account_identities(account_id)",
+    ],
+  },
 ];
 
 export async function migrateDatabase(

@@ -71,7 +71,7 @@ describe("authenticated portable backup", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const serialized = await response.text();
     const backup = JSON.parse(serialized) as BudgetBackup;
-    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 4, schemaVersion: 15 });
+    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 4, schemaVersion: 16 });
     expect(Number.isNaN(Date.parse(backup.exportedAt))).toBe(false);
     expect(Object.keys(backup.data).sort()).toEqual(Object.keys(BACKUP_TABLES).sort());
     expect(backup.data.transactions).toHaveLength(503);

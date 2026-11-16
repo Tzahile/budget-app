@@ -232,26 +232,41 @@ export async function confirmBankAccountMapping(input: {
   const connection = await getBankConnectionForSync(input.connectionId);
   if (!connection || connection.status !== "connected" ||
     (connection.consentExpiresAt && connection.consentExpiresAt <= new Date().toISOString())) throw conflict("Bank connection requires reconnection");
-  const alreadyLinked = await one("SELECT account_id FROM bank_account_links WHERE connection_id = ? AND provider_account_id = ?", [input.connectionId, input.providerAccountId]);
-  const identity = await one("SELECT account_id FROM bank_account_identities WHERE provider = ? AND institution_id = ? AND identity_hash = ?", [connection.provider, connection.institutionId, input.identityHash]);
-  if (alreadyLinked || identity) {
-    const owner = String(alreadyLinked?.account_id ?? identity?.account_id);
-    if (input.accountId !== owner || (alreadyLinked && identity && alreadyLinked.account_id !== identity.account_id)) {
-      throw conflict("Bank account was already mapped; reload before changing it");
+  const readCurrentMapping = () => one(`SELECT l.account_id AS linked_account_id, l.mapping_choice,
+      i.account_id AS identity_account_id, c.status, c.consent_expires_at
+    FROM bank_connections c
+    LEFT JOIN bank_account_links l ON l.connection_id = c.id AND l.provider_account_id = ?
+    LEFT JOIN bank_account_identities i ON i.provider = c.provider AND i.institution_id = c.institution_id AND i.identity_hash = ?
+    WHERE c.id = ?`, [input.providerAccountId, input.identityHash, input.connectionId]);
+  const matchingMappingAccount = (mapping: Row | null): string | null => {
+    if (!mapping || mapping.status !== "connected" ||
+      (mapping.consent_expires_at && String(mapping.consent_expires_at) <= new Date().toISOString())) return null;
+    if (mapping.linked_account_id != null) {
+      if (mapping.identity_account_id !== mapping.linked_account_id) return null;
+      if (mapping.mapping_choice === "separate" ? input.accountId !== null : input.accountId !== mapping.linked_account_id) return null;
+      return String(mapping.linked_account_id);
     }
-    return owner;
+    return input.accountId && input.accountId === mapping.identity_account_id ? input.accountId : null;
+  };
+  const mapping = await readCurrentMapping();
+  const replay = matchingMappingAccount(mapping);
+  if (replay) return replay;
+  if (mapping?.linked_account_id != null || mapping?.identity_account_id != null) {
+    throw conflict("Bank account was already mapped; reload before changing it");
   }
   const accountId = input.accountId ?? crypto.randomUUID();
-  if (input.accountId) {
-    const account = await one("SELECT is_active, currency, type FROM accounts WHERE id = ?", [accountId]);
-    if (!account || account.is_active !== 1 || account.currency !== "EUR" || account.type === "cash") throw conflict("Only an active EUR bank account can be mapped");
-    const occupied = await one(`SELECT 1 FROM bank_account_identities WHERE account_id = ? LIMIT 1`, [accountId]);
-    if (occupied) throw conflict("Bank account is already mapped to another identity");
-  }
   const now = new Date().toISOString();
   const statements: MigrationStatement[] = [
-    { sql: "UPDATE bank_connections SET sync_revision = sync_revision + 1, updated_at = ? WHERE id = ? AND status = 'connected' AND sync_revision = ? AND (consent_expires_at IS NULL OR consent_expires_at > ?)",
-      args: [now, input.connectionId, connection.syncRevision, now] },
+    { sql: `UPDATE bank_connections SET sync_revision = sync_revision + 1, updated_at = ?
+        WHERE id = ? AND status = 'connected' AND sync_revision = ?
+          AND (consent_expires_at IS NULL OR consent_expires_at > ?)
+          AND (? IS NULL OR EXISTS (
+            SELECT 1 FROM accounts a WHERE a.id = ? AND a.is_active = 1 AND a.currency = 'EUR'
+              AND a.type IN ('checking', 'savings')
+              AND NOT EXISTS (SELECT 1 FROM bank_account_identities i WHERE i.account_id = a.id)
+              AND NOT EXISTS (SELECT 1 FROM bank_account_links l WHERE l.account_id = a.id)
+          ))`,
+      args: [now, input.connectionId, connection.syncRevision, now, input.accountId, accountId] },
     "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END",
     "DELETE FROM bank_sync_guards",
   ];
@@ -262,12 +277,16 @@ export async function confirmBankAccountMapping(input: {
   statements.push(
     { sql: "INSERT INTO bank_account_identities (provider, institution_id, identity_hash, account_id) VALUES (?, ?, ?, ?)",
       args: [connection.provider, connection.institutionId, input.identityHash, accountId] },
-    { sql: "INSERT INTO bank_account_links (connection_id, provider_account_id, account_id, created_at) VALUES (?, ?, ?, ?)",
-      args: [input.connectionId, input.providerAccountId, accountId, now] },
+    { sql: "INSERT INTO bank_account_links (connection_id, provider_account_id, account_id, created_at, mapping_choice) VALUES (?, ?, ?, ?, ?)",
+      args: [input.connectionId, input.providerAccountId, accountId, now, input.accountId === null ? "separate" : "existing"] },
   );
   try { await db.batch(statements); }
   catch (error) {
-    if (error instanceof Error && /constraint|check|unique/i.test(error.message)) throw conflict("Bank mapping changed; reload and retry");
+    if (error instanceof Error && /constraint|check|unique/i.test(error.message)) {
+      const winner = matchingMappingAccount(await readCurrentMapping());
+      if (winner) return winner;
+      throw conflict("Bank mapping changed or the account is unavailable; reload and retry");
+    }
     throw error;
   }
   return accountId;
