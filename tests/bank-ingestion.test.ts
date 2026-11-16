@@ -150,17 +150,18 @@ describe("bank snapshot accounting conflicts", () => {
     expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
   });
 
-  it("rolls back a bank snapshot when a statement books overlapping history after staging", async () => {
+  it.each([false, true])("rolls back a staged bank sync after a concurrent statement (shared ID %s)", async (sharedId) => {
     const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic statement race");
-    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Concurrent statement booking" };
+    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Concurrent statement booking", ...(sharedId ? { externalId: "bank-id" } : {}) };
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [sharedId ? booking : { ...booking, occurredOn: "2026-09-21", externalId: "bank-id" }] }] };
     const batch = db.batch.bind(db);
     const concurrentImport = vi.spyOn(db, "batch").mockImplementationOnce(async (statements) => {
       await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement", transactions: [booking] });
       return await batch(statements);
     });
     try {
-      await expect(applyBankConnectionSnapshot({ connectionId, provider: "synthetic", expectedRevision: 1,
-        accounts: [{ ...account, transactions: [{ ...booking, occurredOn: "2026-09-21", externalId: "bank-id" }] }] }))
+      await expect(applyBankConnectionSnapshot(snapshot))
         .rejects.toMatchObject({ status: 409, importId: expect.any(String) });
     } finally {
       concurrentImport.mockRestore();
@@ -168,6 +169,96 @@ describe("bank snapshot accounting conflicts", () => {
     expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE account_id = ?").get(accountId)!.n).toBe(1);
     expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(-400);
     expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(connectionId)!.sync_revision).toBe(1);
+    if (sharedId) {
+      expect(await applyBankConnectionSnapshot(snapshot)).toMatchObject({ importedCount: 0, duplicateCount: 1 });
+      expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE account_id = ?").get(accountId)!.n).toBe(1);
+      expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
+    }
+  });
+
+  it.each(["csv", "xlsx"] as const)("checks %s bookings against committed bank coverage", async (source) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic bank-first account");
+    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Shared entry", externalId: "bank-id" };
+    await applyBankConnectionSnapshot({ connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [booking] }] });
+    const importInput = { accountId, source, filename: "Synthetic statement" };
+    const older = { ...booking, occurredOn: "2026-08-30", amountCents: 100, externalId: "older-id" };
+
+    await expect(ingestTransactions({ ...importInput, transactions: [
+      older, { occurredOn: "2026-09-21", amountCents: -401, description: "Unidentified statement entry" },
+    ] })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
+    await expect(ingestTransactions({ ...importInput, transactions: [{ ...booking, amountCents: -401 }] }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE account_id = ?").get(accountId)!.n).toBe(1);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
+    expect(await ingestTransactions({ ...importInput, transactions: [booking] }))
+      .toMatchObject({ importedCount: 0, duplicateCount: 1 });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
+  });
+
+  it.each([false, true])("rejects a staged statement after a concurrent bank commit (shared ID %s)", async (sharedId) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic bank-first race");
+    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Concurrent bank booking", externalId: "bank-id" };
+    const statement = sharedId ? booking : { ...booking, occurredOn: "2026-09-21", externalId: "statement-id" };
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [booking] }] };
+    const batch = db.batch.bind(db);
+    const concurrentSync = vi.spyOn(db, "batch").mockImplementationOnce(async (statements) => {
+      await applyBankConnectionSnapshot(snapshot);
+      return await batch(statements);
+    });
+    const importInput = { accountId, source: "xlsx" as const, filename: "Synthetic statement", transactions: [statement] };
+    try {
+      await expect(ingestTransactions(importInput))
+        .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
+    } finally {
+      concurrentSync.mockRestore();
+    }
+    if (sharedId) {
+      expect(await ingestTransactions(importInput)).toMatchObject({ importedCount: 0, duplicateCount: 1 });
+    }
+    expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE account_id = ?").get(accountId)!.n).toBe(1);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
+    expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(connectionId)!.sync_revision).toBe(2);
+  });
+
+  it.each(["date", "amount"] as const)("rejects a booked bank %s correction over unresolved statement history", async (change) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic bank revision overlap");
+    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Original bank booking", externalId: "bank-id" };
+    await applyBankConnectionSnapshot({ connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [booking] }] });
+    await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement",
+      transactions: [{ occurredOn: "2026-10-01", amountCents: -500, description: "Unresolved statement booking" }] });
+    const correction = change === "date" ? { ...booking, occurredOn: "2026-10-01" } : { ...booking, amountCents: -500 };
+    await expect(applyBankConnectionSnapshot({ connectionId, provider: "synthetic", expectedRevision: 2,
+      accounts: [{ ...account, coverageThrough: "2026-10-02", balanceCents: 900, transactions: [correction] }] }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps"), importId: expect.any(String) });
+    expect(database.prepare("SELECT date, amount_cents FROM transactions WHERE external_id = 'bank-id'").get())
+      .toEqual({ date: "2026-09-20", amount_cents: -400 });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(500);
+    expect(database.prepare("SELECT last_date FROM bank_account_sync_coverage WHERE account_id = ?").get(accountId)!.last_date)
+      .toBe("2026-09-30");
+    expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(connectionId)!.sync_revision).toBe(2);
+  });
+
+  it("rejects transfer confirmation when a bank date correction leaves the matching window", async () => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic stale transfer");
+    await createAccount({ name: "Synthetic receiving cash", type: "cash", balanceCents: 0 });
+    const receiver = String(database.prepare("SELECT id FROM accounts WHERE type = 'cash'").get()!.id);
+    const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Outgoing transaction", externalId: "bank-id" };
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [booking] }] };
+    await applyBankConnectionSnapshot(snapshot);
+    await ingestTransactions({ accountId: receiver, source: "xlsx", filename: "Synthetic statement",
+      transactions: [{ ...booking, amountCents: 400, externalId: "incoming-id" }] });
+    const candidateId = String(database.prepare("SELECT id FROM ingested_transfer_candidates").get()!.id);
+    await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2,
+      accounts: [{ ...account, transactions: [{ ...booking, occurredOn: "2026-09-24" }] }] });
+
+    await expect(decideIngestedTransferCandidate(candidateId, "confirm")).rejects.toMatchObject({ status: 409 });
+    expect(database.prepare("SELECT status FROM ingested_transfer_candidates WHERE id = ?").get(candidateId)!.status).toBe("pending");
+    expect(database.prepare("SELECT COUNT(*) AS n FROM transactions WHERE transfer_group_id IS NOT NULL").get()!.n).toBe(0);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
   });
 
   it("rolls back a bank update when the owner confirms its transfer after staging", async () => {

@@ -157,12 +157,20 @@ holds distinct funds. Replacing the identity on an already-linked account,
 including a switch of providers for the same bank account, requires a verified
 history cutover and is currently unsupported.
 
-A sync rejects the entire snapshot when new booked bank entries overlap the
-dates of unresolved statement bookings on the same account. Shared stable IDs
-with identical booking details are deduplicated. Otherwise review statement
-history before proceeding. If the statement already contains the verified
-provider IDs, include those IDs when establishing a reconciled ledger. Sync
-cannot use descriptions, dates, or amounts to decide which rows to merge.
+A sync rejects the entire snapshot when new or corrected bank bookings overlap
+unresolved statement bookings on the same account. A statement import also
+fails as a whole when a new booked row falls within recorded bank coverage or
+on a date with a bank booking. Verified shared stable IDs with identical
+booking details are deduplicated. A concurrent commit may cause the other
+operation to fail with a conflict. Retry so it can assess the committed IDs.
+
+Map the verified provider ID column when importing a statement for the first
+time, if the export includes it. Reimporting an earlier statement with added
+IDs does not retrofit IDs onto existing fingerprint rows. BudgetApp has no
+automatic merge or relabeling for those rows. Resolve the overlap before
+resuming sync for that account. Recorded coverage summarizes the earliest
+and latest requested dates, so the guard also blocks bookings inside a
+known gap within that range.
 
 Failed sync attempts record a safe audit entry only after their
 financial snapshot has rolled back. Account-history start and gap flags are

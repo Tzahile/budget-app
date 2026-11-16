@@ -71,9 +71,11 @@ export function decideTransferCandidateStatements(input: {
                 AND outgoing.kind = 'expense' AND incoming.kind = 'income'
                 AND outgoing.account_id <> incoming.account_id
                 AND outgoing.amount_cents = -incoming.amount_cents
+                AND outgoing.voided_at IS NULL AND incoming.voided_at IS NULL
+                AND ABS(julianday(outgoing.date) - julianday(incoming.date)) <= ?
                 AND outgoing.transfer_group_id IS NULL AND incoming.transfer_group_id IS NULL
             )`,
-        args: [input.now, input.transferGroupId, input.candidateId],
+        args: [input.now, input.transferGroupId, input.candidateId, INGESTED_TRANSFER_DATE_TOLERANCE_DAYS],
       },
       { sql: "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END", args: [] },
       { sql: "DELETE FROM bank_sync_guards", args: [] },

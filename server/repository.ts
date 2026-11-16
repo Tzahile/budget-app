@@ -52,6 +52,7 @@ const eligibleBankAccountQuery = `SELECT 1 FROM accounts WHERE is_active = 1 AND
   AND type IN ('checking', 'savings') AND currency = 'EUR'`;
 const bankMappingRequired = "Bank account mapping is required before first sync";
 const bankStatementOverlap = "Bank history overlaps unreconciled statement bookings; review the account before syncing";
+const statementBankOverlap = "Statement history overlaps bank bookings; review the account before importing";
 const requireOneBankChange = [
   "INSERT INTO bank_sync_guards (claim) SELECT CASE WHEN changes() = 1 THEN 1 ELSE 0 END",
   "DELETE FROM bank_sync_guards",
@@ -654,7 +655,7 @@ export async function ingestTransactions(input: {
         // the bank cannot silently rewrite a CSV record or another connection.
         if (previous && previous.account_id === input.accountId && previous.date === transaction.occurredOn &&
             Number(previous.amount_cents) === transaction.amountCents && previous.description === transaction.description &&
-            previous.status === transaction.status) continue;
+            previous.status === transaction.status && previous.voided_at === null) continue;
         throw conflict("Bank transaction identity has conflicting details");
       }
       if (previous.date === transaction.occurredOn && Number(previous.amount_cents) === transaction.amountCents &&
@@ -719,9 +720,14 @@ export async function ingestTransactions(input: {
     const newBookedDates = assessments
       .filter(({ decision, transaction }) => decision === "accepted" && transaction.status !== "pending")
       .map(({ transaction }) => transaction.occurredOn);
-    newBookedDates.push(...bankRevisions
-      .filter(({ transaction, previous }) => transaction.status === "cleared" && previous.status !== "cleared")
-      .map(({ transaction }) => transaction.occurredOn));
+    for (const { transaction, previous } of bankRevisions) {
+      if (transaction.status !== "cleared") continue;
+      if (previous.status !== "cleared" || previous.date !== transaction.occurredOn ||
+          Number(previous.amount_cents) !== transaction.amountCents) {
+        newBookedDates.push(transaction.occurredOn);
+        if (previous.status === "cleared") newBookedDates.push(String(previous.date));
+      }
+    }
     if (newBookedDates.length) {
       newBookedDates.sort();
       const firstDate = newBookedDates[0];
@@ -793,7 +799,26 @@ export async function ingestTransactions(input: {
       args: [now, now, input.bankConnectionId],
     });
   }
-  const replayed = input.deferredStatements ? (input.deferredStatements.push(...plan.statements), null) : await writeIngestionPlan(plan.statements, retryKey, input);
+  const isStatement = input.source === "csv" || input.source === "xlsx";
+  const overlapCheck = isStatement ? statementOverlapCheck(input.accountId, assessments) : null;
+  if (overlapCheck) {
+    // This check runs ahead of writes in the same transaction. If a bank sync
+    // committed after duplicate assessment, the statement is safe to retry.
+    plan.statements.unshift({
+      sql: `INSERT INTO bank_sync_guards (claim) SELECT NOT EXISTS (${overlapCheck.sql})`,
+      args: overlapCheck.args,
+    }, "DELETE FROM bank_sync_guards");
+  }
+  let replayed: Awaited<ReturnType<typeof writeIngestionPlan>>;
+  try {
+    replayed = input.deferredStatements ? (input.deferredStatements.push(...plan.statements), null) : await writeIngestionPlan(plan.statements, retryKey, input);
+  } catch (error) {
+    if (overlapCheck && error instanceof Error && /constraint|check/i.test(error.message) &&
+        (await db.execute(overlapCheck)).rows.length) {
+      throw conflict(statementBankOverlap);
+    }
+    throw error;
+  }
   if (replayed) return replayed;
   return {
     importId,
@@ -803,6 +828,47 @@ export async function ingestTransactions(input: {
     errorCount: 0,
     replayed: false,
   };
+}
+
+/**
+ * A statement booking in known bank history must already exist under the
+ * same stable ID. Dates establish overlap only, never row identity.
+ */
+function statementOverlapCheck(accountId: string, assessments: ReturnType<typeof assessIngestionDuplicates>) {
+  const rows = assessments.map(({ transaction, decision }) => ({
+    id: transaction.importIdentity,
+    date: transaction.occurredOn,
+    amount: transaction.amountCents,
+    description: transaction.description,
+    status: transaction.status ?? "cleared",
+    accepted: decision === "accepted",
+  }));
+  const sql = `SELECT 1 FROM json_each(?) AS statement
+    WHERE EXISTS (
+      SELECT 1 FROM transactions t
+      WHERE t.account_id = ? AND t.source = 'import' AND t.bank_connection_id IS NOT NULL
+        AND t.import_identity = json_extract(statement.value, '$.id')
+        AND (json_extract(statement.value, '$.accepted') = 1 OR t.voided_at IS NOT NULL
+          OR t.date <> json_extract(statement.value, '$.date')
+          OR t.amount_cents <> json_extract(statement.value, '$.amount')
+          OR t.description <> json_extract(statement.value, '$.description')
+          OR t.status <> json_extract(statement.value, '$.status'))
+    ) OR (
+      json_extract(statement.value, '$.accepted') = 1
+      AND json_extract(statement.value, '$.status') = 'cleared'
+      AND (
+        EXISTS (
+          SELECT 1 FROM bank_account_sync_coverage c WHERE c.account_id = ?
+            AND json_extract(statement.value, '$.date') BETWEEN c.first_date AND c.last_date
+        ) OR EXISTS (
+          SELECT 1 FROM transactions t
+          WHERE t.account_id = ? AND t.source = 'import' AND t.bank_connection_id IS NOT NULL
+            AND t.status = 'cleared' AND t.voided_at IS NULL
+            AND t.date = json_extract(statement.value, '$.date')
+        )
+      )
+    ) LIMIT 1`;
+  return { sql, args: [JSON.stringify(rows), accountId, accountId, accountId] };
 }
 
 /** A bank account can only sync through its connected, mapped provider link. */
