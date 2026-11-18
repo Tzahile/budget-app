@@ -37,8 +37,13 @@ before relying on it.
 
 ## Evaluate free hosting
 
-Evaluate the free plans with synthetic data before selecting a host. If an
-owner-controlled domain is already available, use a subdomain such as
+Pilot a free Node service with remote SQLite first because it can use the
+existing ExcelJS parser and avoids Workers Free's per-request CPU limit.
+Select it only if import latency, memory, persistence and external database
+traffic fit the free plans. Keep Workers with D1 as a separate candidate
+requiring changes to import processing and queries.
+
+If an owner-controlled domain is already available, use a subdomain such as
 `budget.example.com` for a portable HTTPS origin. Otherwise use a free provider
 hostname for evaluation and leave the portable hostname decision open. Domain
 registration and renewal can cost money. Keep the evaluation on free plans
@@ -52,7 +57,10 @@ D1 Free allows 500 MB per database and 5 GB per account, 5 million rows
 read and 100,000 rows written per day, and 7 days of point-in-time recovery.
 D1 limits individual statements to 100 KB and 100 bound parameters. Free
 invocations allow 50 queries, with a batch counting as one query for that
-limit. Keep an entire finance operation atomic within a batch. Cloudflare
+limit. BudgetApp's identity lookup binds up to 500 values per statement, so
+a 101-row import can exceed D1's parameter limit. Adapt the lookup to use at
+most 100 bindings per statement without splitting an atomic financial write.
+See [the ingestion lookup](../server/repository.ts#L264-L268). Cloudflare
 advertises no card to start on its developer platform. Use `workers.dev` for
 evaluation or a custom hostname on an active Cloudflare zone if the owner
 approves the DNS setup.
@@ -111,14 +119,26 @@ restart and who owns OS patches. Power, connectivity and storage are the
 owner's responsibility. This is a free candidate only if it needs no new
 hardware, subscription or domain purchase.
 
+### Local XLSX measurement
+
+A single Chromium run against the Node.js 24 harness on `main` at
+`46e09a7` imported all 2,000 synthetic rows from a 30-column workbook
+(384 KB compressed, 7.49 MB expanded), with zero duplicates or ambiguities.
+Metadata, preview and commit requests each took about 24–30 seconds of Node
+process CPU and 26–35 seconds elapsed. The Node process peaked at 496 MiB
+RSS, including Vite and in-memory SQLite and excluding Chromium. A warm
+20-row workbook used 32–45 ms of process CPU per request. These local
+measurements flag request duration and memory headroom for the free Node
+pilot. Provider runtime measurements and remote SQLite behavior still
+need verification.
+
 ### Synthetic pass criteria
 
 1. On a provider-hosted free test deployment, submit valid synthetic XLSX
    workbooks near the 500 KB compressed and 8 MB expanded limits, including a
    2,000-row sheet and a workbook with up to 20 sheets. Run preview and import
-   end to end. Check startup,
-   CPU/memory, database usage and cold OAuth login where applicable within
-   the actual plan limits. Include an oversized workbook rejection without
+   end to end. Check startup, CPU, memory, request duration, database usage
+   and cold OAuth login where applicable within the actual plan limits. Include an oversized workbook rejection without
    committed rows.
 2. Against the candidate's real database and adapter, restore a fresh
    synthetic database and run a maximum-size import. Force a late failure in
