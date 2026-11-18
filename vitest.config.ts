@@ -5,6 +5,7 @@ import { defineConfig } from "vitest/config";
 // tests replace only that boundary with SQLite in memory, while executing the
 // same repository and migration code used by the HTTP entrypoint.
 export default defineConfig({
+  test: { include: ["tests/**/*.test.ts"] },
   resolve: {
     alias: {
       "npm:hono@4.13.7": "hono",
