@@ -201,30 +201,38 @@ pull request.
    Cover all database writers, including background jobs and lazy schema
    migrations. Verify how the gate can be toggled after the platform goes
    read-only. If that cannot be confirmed, close it before December 10
-   and keep the source read-only until cutover. Before final export,
-   stop other writers, wait for in-flight writes to complete, and confirm
-   new writes are rejected on the source. Keep destination writes gated too.
-   The current deployment workflow pushes on every merge to `main`. Before
-   activating the cutover gate, change that workflow through a reviewed PR
-   so it can deploy only an explicitly approved, tested `main` SHA during
-   the transition. Record and verify the gated fallback SHA and retire the
+   and keep the source read-only until cutover. The current deployment
+   workflow pushes on every merge to `main`. Before activating the cutover
+   gate, change that workflow through a reviewed PR so it can deploy only
+   an explicitly approved, tested `main` SHA during the transition. Record and verify the gated fallback SHA and retire the
    old push workflow after cutover. Confirm that merging later changes
    cannot overwrite the gated Val Town deployment.
-3. Test the destination's restore method with synthetic data before the final
-   export. For D1 or libSQL, verify the provider import's failure behavior
-   using an isolated, empty database. Require an all-or-nothing promotion.
-   If a failed import leaves partial data, discard that database and repeat
-   against a fresh one. Bind the app only to the successfully verified
-   database. [D1 import and export](https://developers.cloudflare.com/d1/best-practices/import-export-data/).
-4. For disk-based SQLite, restore into a fresh staging file on the destination
-   filesystem with errors treated as fatal. Stop the app and close all
-   database connections before replacement. Checkpoint WAL files and close
-   cleanly, verifying no outstanding WAL state. Preserve the old database
+3. Qualify the destination's restore method with synthetic data using the
+   applicable restore and validation steps below. For D1 or libSQL, verify
+   failure behavior using an isolated, empty database and require an
+   all-or-nothing promotion. If an import leaves partial data, discard that
+   database and repeat against a fresh one.
+   [D1 import and export](https://developers.cloudflare.com/d1/best-practices/import-export-data/).
+4. After the synthetic restore passes, close the source write gate if it is
+   still open, stop other writers, wait for in-flight writes to finish, and
+   confirm the source rejects new writes. Keep the destination write gate
+   closed. Take a **new SQL dump** from the val-scoped SQLite admin. Verify
+   the export completed and privately record its origin, timestamp, schema
+   version, file size and SHA-256 checksum. Keep the early and final originals
+   separately protected and verify the final checksum again before restore.
+   Use the new dump as the production restore source. Retain the early dump
+   as a fallback.
+5. Restore from the verified final dump using the rehearsed method. For D1 or
+   libSQL, import into a new isolated database and bind the app only after
+   verification. For disk-based SQLite, restore into a fresh staging file on
+   the destination filesystem with errors treated as fatal. Stop the app and
+   close all database connections before replacement. Checkpoint WAL files
+   and close cleanly, verifying no outstanding WAL state. Preserve the old database
    and any matching `-wal` and `-shm` companions together, and keep those
    sidecars out of the replacement. Verify the staged checksum after upload,
    sync the staged file, then atomically rename it on the same filesystem
    and sync the containing directory. [SQLite WAL guidance](https://www.sqlite.org/wal.html).
-5. For disk restores require `PRAGMA integrity_check` to return `ok` and
+6. For disk restores require `PRAGMA integrity_check` to return `ok` and
    `PRAGMA foreign_key_check` to return zero rows. For hosted restores use
    provider-supported integrity and foreign-key checks. For all targets,
    compare table counts and deterministic per-table hashes over rows ordered
@@ -235,7 +243,7 @@ pull request.
    intentional transformation or exclusion requires a documented reason and
    a verified equivalent. Verify that date-only values and Europe/Rome
    month boundaries match in rehearsal.
-6. Bind the chosen hostname and wait for valid TLS. Verify the app shell,
+7. Bind the chosen hostname and wait for valid TLS. Verify the app shell,
    asset loading and anonymous session as above. The operator should confirm
    approved sign-in and denial for an unapproved account. Check anonymous and
    unapproved requests to `/api/data` and `/api/export` return 401 and 403
@@ -251,7 +259,7 @@ pull request.
    Record status, result and Git SHA without account details or financial
    values. Open only the destination write gate after confirming the
    source still rejects writes.
-7. For an optional old `val.run` bookmark redirect, wait until the replacement
+8. For an optional old `val.run` bookmark redirect, wait until the replacement
    is verified. A redirect immediately diverts traffic from the old trigger
    and becomes permanent on December 10. If using it, disable path and query
    forwarding so stale OAuth callback parameters stay off the new origin.
