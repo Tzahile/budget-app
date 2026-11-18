@@ -5,6 +5,7 @@ import { canCleanupDemoData, DEMO_CLEANUP_CONFIRMATION, type Account, type AppDa
 import type { ActivitySource, TransactionPage } from "../../server/transaction-search.ts";
 import { householdDate } from "../../shared/finance.ts";
 import { CsvImport } from "./CsvImport.tsx";
+import { AskAi } from "./AskAi.tsx";
 
 type View = "overview" | "activity" | "planned" | "reserves" | "accounts";
 type Editor =
@@ -241,6 +242,7 @@ function Overview({ data, onAddTransaction, onAddPlanned, onCleanupDemo, onNavig
           ))}
         </div>
       </section>
+      <AskAi />
     </div>
   );
 }

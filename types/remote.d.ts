@@ -42,6 +42,8 @@ declare module "https://esm.town/v/std/utils/index.ts" {
 declare module "https://esm.town/v/std/oauth/middleware.ts" {
   export function getOAuthUserData(request: Request): Promise<null | {
     user: { username: string | null };
+    accessToken: string;
+    expiresAt: number;
   }>;
   export function oauthMiddleware(handler: (request: Request) => Response | Promise<Response>): (request: Request) => Response | Promise<Response>;
 }
@@ -58,3 +60,8 @@ declare module "https://esm.town/v/std/sqlite/main.ts" {
 declare const Deno: {
   env: { get(name: string): string | undefined };
 };
+
+
+declare module "https://esm.town/v/std/oauth/crypto.ts" {
+  export function getOrCreateEncryptionKeyMaterial(redirectUri: string): Promise<string>;
+}
