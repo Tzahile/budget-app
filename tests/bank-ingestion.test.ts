@@ -138,6 +138,128 @@ describe("bank snapshot accounting conflicts", () => {
     expect(database.prepare("SELECT COUNT(*) AS n FROM account_reconciliations").get()!.n).toBe(0);
   });
 
+  it.each(["empty", "all-duplicate", "pending-only"] as const)("rejects a new booked checkpoint over a statement (%s snapshot)", async (shape) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic checkpoint statement");
+    const existing = { occurredOn: "2026-09-20", amountCents: -100, description: "Earlier booking", externalId: "existing-id" };
+    const firstRows = shape === "all-duplicate" ? [existing] : [];
+    const pending = { occurredOn: "2026-10-01", amountCents: -200, description: "Pending hold", externalId: "pending-id", status: "pending" as const };
+    const nextRows = shape === "pending-only" ? [pending] : firstRows;
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: firstRows }] };
+    await applyBankConnectionSnapshot(snapshot);
+    await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement", transactions: [
+      { occurredOn: "2026-10-01", amountCents: -200, description: "Local booking" },
+    ] });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+    const connectionState = database.prepare("SELECT sync_revision, last_synced_at FROM bank_connections WHERE id = ?");
+    const before = connectionState.get(connectionId);
+
+    await expect(applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2,
+      accounts: [{ ...account, coverageThrough: "2026-10-02", transactions: nextRows }] }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps"), importId: expect.any(String) });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+    expect(database.prepare("SELECT date, amount_cents, bank_connection_id FROM transactions WHERE account_id = ? AND date = '2026-10-01'").all(accountId))
+      .toEqual([{ date: "2026-10-01", amount_cents: -200, bank_connection_id: null }]);
+    expect(database.prepare("SELECT last_date FROM bank_account_sync_coverage WHERE account_id = ?").get(accountId)!.last_date)
+      .toBe("2026-09-30");
+    expect(database.prepare("SELECT COUNT(*) AS n FROM account_reconciliations WHERE account_id = ?").get(accountId)!.n).toBe(1);
+    expect(connectionState.get(connectionId)).toEqual(before);
+  });
+
+  it("keeps statement history before the first coverage window and permits empty repeat syncs", async () => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic prior statement");
+    await ingestTransactions({ accountId, source: "xlsx", filename: "Synthetic statement", transactions: [
+      { occurredOn: "2026-08-31", amountCents: -200, description: "Historical booking" },
+    ] });
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [] }] };
+    expect(await applyBankConnectionSnapshot(snapshot)).toMatchObject({ importedCount: 0, duplicateCount: 0 });
+    expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2,
+      accounts: [{ ...account, coverageThrough: "2026-10-02", transactions: [] }] }))
+      .toMatchObject({ importedCount: 0, duplicateCount: 0 });
+    expect(database.prepare("SELECT date, amount_cents FROM transactions WHERE account_id = ?").all(accountId))
+      .toEqual([{ date: "2026-08-31", amount_cents: -200 }]);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(1000);
+  });
+
+  it.each([false, true])("rejects an empty snapshot whose coverage reaches a statement (prior checkpoint %s)", async (priorCheckpoint) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic statement coverage");
+    await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement", transactions: [
+      { occurredOn: "2026-08-31", amountCents: -200, description: "Historical booking" },
+    ] });
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [] }] };
+    if (priorCheckpoint) await applyBankConnectionSnapshot(snapshot);
+    await expect(applyBankConnectionSnapshot({ ...snapshot, expectedRevision: priorCheckpoint ? 2 : 1,
+      accounts: [{ ...account, coverageFrom: "2026-08-31", transactions: [] }] }))
+      .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
+  });
+
+  it.each([
+    { through: "2026-09-30", reportsLaterBooking: false },
+    { through: "2026-09-29", reportsLaterBooking: false },
+    { through: "2026-09-30", reportsLaterBooking: true },
+  ])("keeps a later statement delta when the checkpoint is $through (shared ID $reportsLaterBooking)", async ({ through, reportsLaterBooking }) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic later statement");
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [] }] };
+    await applyBankConnectionSnapshot(snapshot);
+    expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2 }))
+      .toMatchObject({ importedCount: 0, duplicateCount: 0 });
+    const booking = { occurredOn: "2026-10-01", amountCents: -200, description: "Later booking", externalId: "later-id" };
+    await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement", transactions: [booking] });
+
+    await expect(applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 3, accounts: [{ ...account,
+      coverageThrough: through, transactions: reportsLaterBooking ? [booking] : [],
+    }] })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+    expect(database.prepare("SELECT COUNT(*) AS n FROM account_reconciliations WHERE account_id = ?").get(accountId)!.n).toBe(1);
+
+    expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 3, accounts: [{ ...account,
+      coverageThrough: booking.occurredOn, balanceCents: 800, transactions: [booking],
+    }] })).toMatchObject({ importedCount: 0, duplicateCount: 1 });
+    expect(database.prepare("SELECT date, amount_cents FROM transactions WHERE account_id = ?").all(accountId))
+      .toEqual([{ date: booking.occurredOn, amount_cents: -200 }]);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+  });
+
+  it.each([
+    { from: "2027-01-01", through: "2027-03-31" },
+    { from: "2026-09-01", through: "2026-09-30" },
+  ])("rolls back a pending-only checkpoint through $through when a later statement commits first", async ({ from, through }) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic checkpoint race");
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [] }] };
+    await applyBankConnectionSnapshot(snapshot);
+    const batch = db.batch.bind(db);
+    const concurrentImport = vi.spyOn(db, "batch").mockImplementationOnce(async (statements) => {
+      await ingestTransactions({ accountId, source: "xlsx", filename: "Synthetic statement", transactions: [
+        { occurredOn: "2026-10-01", amountCents: -200, description: "Concurrent booking" },
+      ] });
+      return await batch(statements);
+    });
+    try {
+      await expect(applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2, accounts: [{ ...account,
+        coverageFrom: from, coverageThrough: through,
+        transactions: [{ occurredOn: through, amountCents: -100, description: "Pending hold",
+          externalId: "pending-id", status: "pending" }],
+      }] })).rejects.toMatchObject({ status: 409, importId: expect.any(String) });
+    } finally {
+      concurrentImport.mockRestore();
+    }
+    expect(database.prepare("SELECT date, amount_cents, status FROM transactions WHERE account_id = ?").all(accountId))
+      .toEqual([{ date: "2026-10-01", amount_cents: -200, status: "cleared" }]);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+    expect(database.prepare("SELECT last_date, has_gap FROM bank_account_sync_coverage WHERE account_id = ?").get(accountId))
+      .toEqual({ last_date: "2026-09-30", has_gap: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM account_reconciliations WHERE account_id = ?").get(accountId)!.n).toBe(1);
+    expect(database.prepare("SELECT sync_revision FROM bank_connections WHERE id = ?").get(connectionId)!.sync_revision).toBe(2);
+    expect(database.prepare("SELECT status, row_count FROM imports WHERE bank_connection_id = ? ORDER BY status").all(connectionId))
+      .toEqual([{ status: "completed", row_count: 0 }, { status: "failed", row_count: 0 }]);
+    expect(database.prepare(`SELECT COUNT(*) AS n FROM ingestion_items i JOIN imports r ON r.id = i.import_id
+      WHERE r.bank_connection_id = ?`).get(connectionId)!.n).toBe(0);
+  });
+
   it("keeps shared statement IDs deduplicated alongside new bank entries and on repeat sync", async () => {
     const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic reconciled statement");
     const booking = { occurredOn: "2026-09-20", amountCents: -400, description: "Shared entry", externalId: "shared-id" };
@@ -146,6 +268,9 @@ describe("bank snapshot accounting conflicts", () => {
       transactions: [booking, { ...booking, amountCents: -800, description: "Additional booking", externalId: "additional-id" }] }] };
     expect(await applyBankConnectionSnapshot(snapshot)).toMatchObject({ importedCount: 1, duplicateCount: 1 });
     expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2 })).toMatchObject({ importedCount: 0, duplicateCount: 2 });
+    expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 3,
+      accounts: [{ ...account, coverageThrough: "2026-10-02", transactions: [] }] }))
+      .toMatchObject({ importedCount: 0, duplicateCount: 0 });
     await expect(ingestTransactions({ accountId, source: "xlsx", filename: "Synthetic statement",
       transactions: [{ ...booking, amountCents: -401 }] }))
       .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
