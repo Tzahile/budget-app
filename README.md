@@ -27,6 +27,8 @@ available to spend.
 - disabled-by-default, authenticated Android notification ingestion API foundation with explicit confirmation and conservative overlap rejection (no native listener yet)
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
+- server-only Gemini advisory adapter with strict redacted input and bounded
+  advisory output; no active AI endpoint or UI (Italy free-tier rollout blocked)
 
 All persisted money uses integer EUR cents. See
 [`docs/financial-semantics.md`](docs/financial-semantics.md) for the exact
@@ -34,10 +36,17 @@ calculation rules, [`docs/database-migrations.md`](docs/database-migrations.md)
 for schema-change conventions,
 [`docs/backup-format.md`](docs/backup-format.md) for backup format and exclusions,
 [`docs/open-banking-architecture.md`](docs/open-banking-architecture.md) for
-the Open Banking integration boundary, and [`ROADMAP.md`](ROADMAP.md) for
+the Open Banking integration boundary,
+[`docs/ai-snapshot.md`](docs/ai-snapshot.md) for the AI privacy boundary and
+Gemini EEA deployment gate, and [`ROADMAP.md`](ROADMAP.md) for
 remaining Open Banking and React Native work.
 
 ## Local checks and PR validation
+
+Browser regressions use the actual app and API with an isolated synthetic
+SQLite harness: `npm run test:e2e`. See
+[`docs/browser-tests.md`](docs/browser-tests.md) for browser setup, desktop/phone
+coverage, and the deferred Open Banking sync scenario.
 
 During implementation, run focused checks for the files and behaviors you change;
 for example, `npx vitest run tests/<relevant-test>.test.ts` or
