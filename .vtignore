@@ -3,6 +3,10 @@
 .gitignore
 node_modules/
 tests/
+e2e/
+playwright.config.ts
+playwright-report/
+test-results/
 types/
 package-lock.json
 package.json
