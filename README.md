@@ -23,6 +23,8 @@ available to spend.
 - canonical transaction ingestion with validated CSV and XLSX adapters, atomic row-level history, and retry-safe import runs
 - CSV/XLSX import in Activity with column mapping, row preview, explicit date/decimal formats, and editable saved profiles
 - explicit review of detected owned-account transfers from imported transactions
+- gated provider-neutral Open Banking adapters (Enable Banking and GoCardless), consent state, manual sync and reconciliation
+  foundation; live BBVA Italy connection remains gated on provider verification
 - authenticated versioned JSON backup download of canonical and audit data
 - documented provider-neutral Open Banking architecture, consent boundary, and
   BBVA Italy coverage verification gate
@@ -39,6 +41,9 @@ the Open Banking integration boundary,
 [`docs/ai-snapshot.md`](docs/ai-snapshot.md) for the AI privacy boundary and
 Gemini EEA deployment gate, and [`ROADMAP.md`](ROADMAP.md) for
 remaining Open Banking and React Native work.
+See [`docs/open-banking-operations.md`](docs/open-banking-operations.md) for
+provider setup and recovery. The code does not claim that BBVA Italy is
+currently supported by the candidate provider.
 
 ## Local checks and PR validation
 

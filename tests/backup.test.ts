@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { useTestSqlite } from "./support/val-sqlite.ts";
-import { BACKUP_TABLES, type BudgetBackup } from "../server/backup.ts";
+import { BACKUP_SCHEMA_VERSION, BACKUP_TABLES, type BudgetBackup } from "../server/backup.ts";
 
 let database: DatabaseSync;
 let handler: (request: Request) => Response | Promise<Response>;
@@ -71,7 +71,7 @@ describe("authenticated portable backup", () => {
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     const serialized = await response.text();
     const backup = JSON.parse(serialized) as BudgetBackup;
-    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 3, schemaVersion: 12 });
+    expect(backup).toMatchObject({ format: "budgetapp-backup", formatVersion: 4, schemaVersion: 17 });
     expect(Number.isNaN(Date.parse(backup.exportedAt))).toBe(false);
     expect(Object.keys(backup.data).sort()).toEqual(Object.keys(BACKUP_TABLES).sort());
     expect(backup.data.transactions).toHaveLength(503);
@@ -91,7 +91,7 @@ describe("authenticated portable backup", () => {
   });
 
   it("fails closed when new schema data has not been reviewed for portability", async () => {
-    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (13, '2026-09-01')").run();
+    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, '2026-09-01')").run(BACKUP_SCHEMA_VERSION + 1);
     const response = await request("/api/export");
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: "Unexpected server error" });
