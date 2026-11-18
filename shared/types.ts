@@ -137,6 +137,7 @@ export interface Reserve {
 }
 
 export interface PlannedOccurrence {
+  currency: string;
   plannedTransactionId: string;
   description: string;
   kind: PlannedKind;
@@ -148,6 +149,7 @@ export interface PlannedOccurrence {
 }
 
 export interface DashboardSummary {
+  currency: string;
   asOfDate: string;
   monthStart: string;
   monthEnd: string;
@@ -171,6 +173,7 @@ export interface DashboardSummary {
 
 /** A deterministic forecast month. Advisory safe-spending guidance is separate. */
 export interface CashFlowProjectionMonth {
+  currency: string;
   monthStart: string;
   monthEnd: string;
   openingCashCents: number;

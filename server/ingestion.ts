@@ -1,3 +1,4 @@
+import { assertCurrencyCode, assertSameCurrency, DEFAULT_CURRENCY } from "../shared/currency.ts";
 import { assertDateOnly } from "../shared/finance.ts";
 import type { TransactionStatus } from "../shared/types.ts";
 import type { MigrationStatement } from "./migrations.ts";
@@ -7,6 +8,7 @@ export type IngestionSource = "csv" | "xlsx" | "open_banking";
 /** The source-neutral boundary every import and future bank sync must cross. */
 export interface CanonicalTransactionInput {
   occurredOn: string;
+  currency?: string;
   amountCents: number;
   description: string;
   /** Provider classification when known. Positive credits default to income. */
@@ -19,6 +21,7 @@ export interface CanonicalTransactionInput {
 
 export interface CsvColumnMapping {
   date: string;
+  currency?: string;
   amount?: string;
   debit?: string;
   credit?: string;
@@ -37,12 +40,13 @@ export interface CsvParseResult {
 
 export interface IngestionRowError {
   sourcePosition: number;
-  code: "invalid_date" | "invalid_amount" | "invalid_description" | "external_id_too_long" | "invalid_status" | "invalid_row";
+  code: "invalid_date" | "invalid_amount" | "invalid_description" | "external_id_too_long" | "invalid_status" | "invalid_currency" | "unsupported_currency" | "invalid_row";
   /** Bounded, allow-listed summary that cannot include source financial data. */
   summary: string;
 }
 
 export interface PreparedIngestionTransaction extends CanonicalTransactionInput {
+  currency: string;
   id: string;
   importIdentity: string;
   /** External IDs can prove an existing record is the same; fingerprints cannot. */
@@ -115,7 +119,13 @@ export function parseTabularTransactions(rows: string[][], mapping: CsvColumnMap
   const descriptionIndex = indexFor(mapping.description, true);
   const externalIdIndex = mapping.externalId ? indexFor(mapping.externalId, true) : -1;
   const statusIndex = mapping.status ? indexFor(mapping.status, true) : -1;
-  if (new Set([dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex].filter((index) => index >= 0)).size !== [dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex].filter((index) => index >= 0).length) throw new Error("Each mapped column must be distinct");
+  const recognizedCurrencyIndexes = headers.flatMap((header, index) => header === "currency" || header === "valuta" ? [index] : []);
+  if (recognizedCurrencyIndexes.length > 1) throw new Error("Use only one Currency or Valuta column");
+  const currencyIndex = mapping.currency ? indexFor(mapping.currency, true) : recognizedCurrencyIndexes[0] ?? -1;
+  if (recognizedCurrencyIndexes.length && !recognizedCurrencyIndexes.includes(currencyIndex)) {
+    throw new Error("Map the Currency or Valuta column");
+  }
+  if (new Set([dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex, currencyIndex].filter((index) => index >= 0)).size !== [dateIndex, amountIndex, debitIndex, creditIndex, descriptionIndex, externalIdIndex, statusIndex, currencyIndex].filter((index) => index >= 0).length) throw new Error("Each mapped column must be distinct");
   if (mapping.dateFormat && !["iso", "day_first", "month_first"].includes(mapping.dateFormat)) throw new Error("date format is invalid");
   if (mapping.decimalSeparator && mapping.decimalSeparator !== "," && mapping.decimalSeparator !== ".") throw new Error("decimal separator is invalid");
   const transactions: CanonicalTransactionInput[] = [];
@@ -132,9 +142,14 @@ export function parseTabularTransactions(rows: string[][], mapping: CsvColumnMap
       if (!description || description.length > maxDescriptionLength) throw new Error("description is missing or too long");
       const externalId = externalIdIndex < 0 ? null : valueAt(row, externalIdIndex).trim() || null;
       if (externalId && externalId.length > maxExternalIdLength) throw new Error("external ID is too long");
+      const currency = currencyIndex < 0 ? undefined : valueAt(row, currencyIndex).trim();
+      if (currency !== undefined) {
+        try { assertCurrencyCode(currency); } catch { throw new Error("currency is invalid"); }
+      }
       const status = statusIndex < 0 ? "cleared" : parseStatus(valueAt(row, statusIndex));
       transactions.push({
         occurredOn, amountCents, description, externalId, status,
+        ...(currency === undefined ? {} : { currency }),
         auditMetadata: { adapter, row: String(rowNumber) },
       });
     } catch (error) {
@@ -145,6 +160,25 @@ export function parseTabularTransactions(rows: string[][], mapping: CsvColumnMap
     }
   });
   return { transactions, errors, rowErrors };
+}
+
+/** Convert unsupported tabular rows to durable audit errors before canonical preparation. */
+export function tabularRowsForEurImport(parsed: CsvParseResult): CsvParseResult {
+  const transactions: CanonicalTransactionInput[] = [];
+  const rowErrors = [...parsed.rowErrors];
+  const errors = [...parsed.errors];
+  for (const [index, transaction] of parsed.transactions.entries()) {
+    if (transaction.currency === undefined || transaction.currency === DEFAULT_CURRENCY) {
+      transactions.push(transaction);
+      continue;
+    }
+    const position = sourcePosition(transaction, index);
+    const code = "unsupported_currency";
+    const summary = safeRowErrorSummary(code);
+    rowErrors.push({ sourcePosition: position, code, summary });
+    errors.push(`Row ${position}: ${summary}`);
+  }
+  return { transactions, rowErrors, errors };
 }
 
 export function csvHeaders(csv: string): string[] {
@@ -158,6 +192,7 @@ export async function prepareCanonicalTransactions(input: {
   source: IngestionSource;
   accountId: string;
   transactions: readonly CanonicalTransactionInput[];
+  accountCurrency?: string;
   createId?: () => string;
 }): Promise<PreparedIngestionTransaction[]> {
   // Node's Web Crypto implementation requires its receiver, unlike the
@@ -165,7 +200,11 @@ export async function prepareCanonicalTransactions(input: {
   const createId = input.createId ?? (() => crypto.randomUUID());
   const identities = new Set<string>();
   const prepared: PreparedIngestionTransaction[] = [];
-  for (const [index, transaction] of input.transactions.entries()) {
+  const accountCurrency = input.accountCurrency ?? DEFAULT_CURRENCY;
+  assertCurrencyCode(accountCurrency);
+  for (const [index, sourceTransaction] of input.transactions.entries()) {
+    const transaction = { ...sourceTransaction, currency: sourceTransaction.currency === undefined ? accountCurrency : sourceTransaction.currency };
+    assertSameCurrency([transaction], accountCurrency);
     validateCanonical(transaction);
     const { importIdentity, identityKind } = await canonicalImportIdentity(input.source, input.accountId, transaction);
     // Keep repeated fallback tuples for assessment: they might be two genuine
@@ -205,8 +244,8 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
       sql: `INSERT OR IGNORE INTO transactions
         (id, account_id, date, amount_cents, currency, description, kind, status, source,
          external_id, import_identity, raw_metadata, created_at, updated_at, is_demo)
-        VALUES (?, ?, ?, ?, 'EUR', ?, ?, ?, 'import', ?, ?, ?, ?, ?, 0)`,
-      args: [transaction.id, input.accountId, transaction.occurredOn, transaction.amountCents, transaction.description,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?, ?, 0)`,
+      args: [transaction.id, input.accountId, transaction.occurredOn, transaction.amountCents, transaction.currency, transaction.description,
         transaction.kind, transaction.status ?? "cleared", transaction.externalId ?? null, transaction.importIdentity,
         transaction.metadataJson, input.now, input.now],
     });
@@ -319,6 +358,7 @@ function csvErrorCode(message: string): IngestionRowError["code"] {
   if (message === "description is missing or too long") return "invalid_description";
   if (message === "external ID is too long") return "external_id_too_long";
   if (message === "status is invalid") return "invalid_status";
+  if (message === "currency is invalid") return "invalid_currency";
   return "invalid_row";
 }
 
@@ -329,6 +369,8 @@ function safeRowErrorSummary(code: IngestionRowError["code"]): string {
     invalid_description: "Description is missing or too long",
     external_id_too_long: "External ID is too long",
     invalid_status: "Status is invalid",
+    invalid_currency: "Currency is invalid",
+    unsupported_currency: "Only EUR is supported; currency conversion is unavailable",
     invalid_row: "Row is invalid",
   };
   return summaries[code] ?? summaries.invalid_row;
@@ -380,6 +422,7 @@ export function assessIngestionDuplicates(
 }
 
 function validateCanonical(transaction: CanonicalTransactionInput): void {
+  if (transaction.currency !== undefined) assertCurrencyCode(transaction.currency);
   try { assertDateOnly(transaction.occurredOn); } catch { throw new Error("date must be YYYY-MM-DD"); }
   if (!Number.isSafeInteger(transaction.amountCents) || transaction.amountCents === 0) throw new Error("amount must be non-zero integer cents");
   if (transaction.kind !== undefined &&

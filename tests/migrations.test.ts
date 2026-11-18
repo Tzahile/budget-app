@@ -48,7 +48,7 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     expect(columns("accounts")).toContain("is_demo");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
@@ -83,7 +83,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -178,18 +178,34 @@ describe("database migrations", () => {
       .toMatchObject({ linked_planned_transaction_id: null });
   });
 
+  it("preserves legacy denominations and guards future writes without converting balances", async () => {
+    await migrateDatabase(database, migrations.slice(0, 12), () => appliedAt);
+    const insertAccount = sqlite.prepare(`INSERT INTO accounts (id, name, type, currency, balance_cents, created_at, updated_at) VALUES (?, 'Synthetic', 'checking', ?, 12345, ?, ?)`);
+    insertAccount.run("usd", "USD", appliedAt, appliedAt);
+    insertAccount.run("eur", "EUR", appliedAt, appliedAt);
+    await migrateDatabase(database, migrations, () => appliedAt);
+    expect(sqlite.prepare("SELECT currency, balance_cents FROM accounts WHERE id = 'usd'").get()).toMatchObject({ currency: "USD", balance_cents: 12345 });
+    expect(() => insertAccount.run("bad", "eur", appliedAt, appliedAt)).toThrow("Invalid currency");
+    expect(() => sqlite.exec("UPDATE accounts SET currency = 'EUR' WHERE id = 'usd'")).toThrow("Currency is immutable");
+    const transaction = sqlite.prepare(`INSERT INTO transactions (id, account_id, date, amount_cents, currency, description, kind, status, source, created_at, updated_at) VALUES (?, ?, '2026-09-16', -200, ?, 'Synthetic', 'expense', 'cleared', 'manual', ?, ?)`);
+    expect(() => transaction.run("mismatch", "eur", "USD", appliedAt, appliedAt)).toThrow("currency must match account");
+    transaction.run("valid", "usd", "USD", appliedAt, appliedAt);
+    expect(() => sqlite.exec("UPDATE transactions SET account_id = 'eur' WHERE id = 'valid'")).toThrow("currency must match account");
+    expect(() => sqlite.exec("UPDATE transactions SET currency = 'EUR' WHERE id = 'valid'")).toThrow(/Currency is immutable|currency must match account/);
+  });
+
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 13,
+      version: 14,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 13 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 14 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   });
 });
 

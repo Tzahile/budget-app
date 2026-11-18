@@ -1,3 +1,4 @@
+import { assertSupportedCurrency, assertSameCurrency } from "./currency.ts";
 import { assertDateOnly } from "./finance.ts";
 import type { DashboardSummary } from "./types.ts";
 
@@ -48,6 +49,8 @@ function month(date: string): string {
 
 /** Pure allowlist projection. Never spread dashboard objects into an AI payload. */
 export function createRedactedFinancialSnapshot(dashboard: DashboardSummary): RedactedFinancialSnapshot {
+  assertSupportedCurrency(dashboard.currency);
+  assertSameCurrency(dashboard.projectionMonths, dashboard.currency);
   const projectionMonths = dashboard.projectionMonths.map((projection) => Object.freeze({
     month: month(projection.monthStart),
     expectedIncomeCents: cents(projection.expectedIncomeCents),
@@ -59,7 +62,7 @@ export function createRedactedFinancialSnapshot(dashboard: DashboardSummary): Re
 
   return Object.freeze({
     schemaVersion: 1,
-    currency: "EUR",
+    currency: dashboard.currency,
     asOfMonth: month(dashboard.asOfDate),
     currentCashCents: cents(dashboard.currentCashCents),
     spentThisMonthCents: cents(dashboard.spentThisMonthCents),

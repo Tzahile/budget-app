@@ -1,3 +1,4 @@
+import { assertSameCurrency, DEFAULT_CURRENCY } from "./currency.ts";
 import type {
   Account,
   CashFlowProjectionMonth,
@@ -79,6 +80,7 @@ export function occurrencesBetween(
         description: item.description,
         kind: item.kind,
         amountCents: item.amountCents,
+        currency: item.currency,
         date: cursor,
         linkedReserveId: null,
         linkedReserveName: null,
@@ -93,11 +95,14 @@ export function occurrencesBetween(
 
 export function calculateDashboard(input: {
   asOfDate: string;
+  currency?: string;
   accounts: Account[];
   transactions: Transaction[];
   plannedTransactions: PlannedTransaction[];
   reserves: Reserve[];
 }): DashboardSummary {
+  const currency = input.currency ?? DEFAULT_CURRENCY;
+  assertSameCurrency([...input.accounts, ...input.transactions, ...input.plannedTransactions, ...input.reserves], currency);
   const { start, end } = monthBounds(input.asOfDate);
   const currentCashCents = sum(input.accounts.filter((a) => a.isActive), (a) => a.balanceCents);
   const monthTransactions = input.transactions.filter(
@@ -147,6 +152,7 @@ export function calculateDashboard(input: {
   const projectionMonths = calculateCashFlowProjection(input);
 
   return {
+    currency,
     asOfDate: input.asOfDate,
     monthStart: start,
     monthEnd: end,
@@ -172,11 +178,14 @@ export function calculateDashboard(input: {
  */
 export function calculateCashFlowProjection(input: {
   asOfDate: string;
+  currency?: string;
   accounts: Account[];
   plannedTransactions: PlannedTransaction[];
   reserves: Reserve[];
   months?: number;
 }): CashFlowProjectionMonth[] {
+  const currency = input.currency ?? DEFAULT_CURRENCY;
+  assertSameCurrency([...input.accounts, ...input.plannedTransactions, ...input.reserves], currency);
   assertDateOnly(input.asOfDate);
   const months = input.months ?? 6;
   if (!Number.isInteger(months) || months < 1 || months > 24) {
@@ -233,6 +242,7 @@ export function calculateCashFlowProjection(input: {
     const protectedReservesCents = grossProtectedCents - linkedGoalCoverageCents;
     const projectedMonthEndCents = openingCashCents + expectedIncomeCents - committedExpensesCents;
     result.push({
+      currency,
       monthStart,
       monthEnd,
       openingCashCents,

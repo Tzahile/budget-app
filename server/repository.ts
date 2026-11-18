@@ -1,3 +1,4 @@
+import { assertSupportedCurrency, DEFAULT_CURRENCY } from "../shared/currency.ts";
 import { addRecurrence, calculateDashboard, householdDate, requiredGoalContributionCents } from "../shared/finance.ts";
 import {
   DEMO_CLEANUP_CONFIRMATION,
@@ -51,6 +52,7 @@ export async function listTransactions(filters: TransactionFilters): Promise<Tra
   await ensureSchema();
   const result = await db.execute(transactionPageQuery(filters));
   const rows = result.rows as Row[];
+  for (const row of rows) assertSupportedCurrency(row.currency);
   return {
     items: rows.slice(0, filters.limit).map((row) => ({
       ...mapTransaction(row), activitySource: row.activity_source as TransactionPage["items"][number]["activitySource"],
@@ -81,6 +83,7 @@ export async function getAppData(asOfDate = householdDate()): Promise<AppData> {
   const plannedTransactions = plannedResult.rows.map(mapPlanned);
   const plannedCompletions = completionResult.rows.map(mapCompletion);
   const reserves = reserveResult.rows.map((row) => mapReserve(row, asOfDate));
+  for (const item of [...accounts, ...transactions, ...plannedTransactions, ...reserves, ...plannedCompletions.flatMap((completion) => completion.effectiveTransaction ? [completion.originalTransaction, completion.effectiveTransaction] : [completion.originalTransaction])]) assertSupportedCurrency(item.currency);
   const demoDataState = demoStateFromRow(demoResult.rows[0] as Row | undefined);
   return {
     accounts,
@@ -104,8 +107,8 @@ export async function createAccount(input: {
   const now = new Date().toISOString();
   await db.execute({
     sql: `INSERT INTO accounts (id, name, type, currency, balance_cents, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, 'EUR', ?, 1, ?, ?)`,
-    args: [crypto.randomUUID(), input.name, input.type, input.balanceCents, now, now],
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+    args: [crypto.randomUUID(), input.name, input.type, DEFAULT_CURRENCY, input.balanceCents, now, now],
   });
 }
 
@@ -128,6 +131,7 @@ export async function reconcileAccount(id: string, input: {
   note: string;
 }): Promise<void> {
   await ensureSchema();
+  await assertSupportedAccountCurrencies(id);
   const reconciliationId = crypto.randomUUID();
   await db.batch(reconcileAccountStatements({
     reconciliationId,
@@ -139,8 +143,9 @@ export async function reconcileAccount(id: string, input: {
   }));
   const created = await one("SELECT id FROM account_reconciliations WHERE id = ?", [reconciliationId]);
   if (created) return;
-  const account = await one("SELECT is_active FROM accounts WHERE id = ?", [id]);
+  const account = await one("SELECT currency FROM accounts WHERE id = ?", [id]);
   if (!account) throw notFound("Account");
+  assertSupportedCurrency(account.currency);
   throw conflict("Only active accounts can be reconciled");
 }
 
@@ -160,14 +165,15 @@ export async function createTransaction(input: {
   plannedTransactionId?: string | null;
 }): Promise<void> {
   await ensureSchema();
+  await assertSupportedAccountCurrencies(input.accountId);
   const signedAmount = input.kind === "expense" ? -input.amountCents : input.amountCents;
   const now = new Date().toISOString();
   await db.batch([
     {
       sql: `INSERT INTO transactions
         (id, account_id, date, amount_cents, currency, description, kind, status, source, planned_transaction_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'EUR', ?, ?, 'cleared', ?, ?, ?, ?)`,
-      args: [crypto.randomUUID(), input.accountId, input.date, signedAmount, input.description, input.kind,
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'cleared', ?, ?, ?, ?)`,
+      args: [crypto.randomUUID(), input.accountId, input.date, signedAmount, DEFAULT_CURRENCY, input.description, input.kind,
         input.source ?? "manual", input.plannedTransactionId ?? null, now, now],
     },
     { sql: "UPDATE accounts SET balance_cents = balance_cents + ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [signedAmount, now, input.accountId] },
@@ -256,8 +262,11 @@ export async function ingestTransactions(input: {
   if (!input.transactions.length && !rowErrors.length) {
     throw Object.assign(new Error("No transactions or row errors to record"), { status: 400 });
   }
+  const account = await one("SELECT currency FROM accounts WHERE id = ?", [input.accountId]);
+  if (!account) throw notFound("Account");
+  assertSupportedCurrency(account.currency);
   const prepared = await prepareCanonicalTransactions({
-    source: input.source, accountId: input.accountId, transactions: input.transactions,
+    source: input.source, accountId: input.accountId, transactions: input.transactions, accountCurrency: String(account.currency),
   });
   const identities = prepared.map((transaction) => transaction.importIdentity);
   const existing = new Set<string>();
@@ -291,7 +300,7 @@ export async function ingestTransactions(input: {
     importId, accountId: input.accountId, filename: input.filename, source: input.source,
     transactions: prepared, assessments, retryKey, now,
   });
-  const eligible = await db.execute(`SELECT id, account_id, date, amount_cents FROM transactions
+  const eligible = await db.execute(`SELECT id, account_id, date, amount_cents, currency FROM transactions
     WHERE source = 'import' AND status = 'cleared' AND kind IN ('income', 'expense')
       AND voided_at IS NULL AND transfer_group_id IS NULL`);
   const acceptedForDetection: TransferDetectionTransaction[] = assessments
@@ -300,10 +309,10 @@ export async function ingestTransactions(input: {
       id: transaction.id,
       accountId: input.accountId,
       occurredOn: transaction.occurredOn,
-      amountCents: transaction.amountCents,
+      amountCents: transaction.amountCents, currency: transaction.currency,
     }));
   const existingForDetection: TransferDetectionTransaction[] = eligible.rows.map((row) => ({
-    id: String(row.id), accountId: String(row.account_id), occurredOn: String(row.date), amountCents: Number(row.amount_cents),
+    id: String(row.id), accountId: String(row.account_id), occurredOn: String(row.date), amountCents: Number(row.amount_cents), currency: String(row.currency),
   }));
   plan.statements.push(...insertTransferCandidateStatements({
     pairs: detectIngestedTransferPairs([...existingForDetection, ...acceptedForDetection]),
@@ -446,6 +455,8 @@ export async function updateTransaction(id: string, input: {
   const oldAmount = Number(existing.amount_cents);
   const newAmount = input.kind === "expense" ? -input.amountCents : input.amountCents;
   const oldAccountId = String(existing.account_id);
+  assertSupportedCurrency(existing.currency);
+  await assertSupportedAccountCurrencies(oldAccountId, input.accountId);
   const now = new Date().toISOString();
   await db.batch([
     { sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?", args: [oldAmount, now, oldAccountId] },
@@ -463,6 +474,8 @@ export async function deleteTransaction(id: string): Promise<void> {
   if (!existing) throw notFound("Transaction");
   if (existing.source !== "manual") throw conflict("Only manual transactions can be deleted directly");
   if (existing.kind === "transfer") throw conflict("Delete transfers as one linked transfer");
+  assertSupportedCurrency(existing.currency);
+  await assertSupportedAccountCurrencies(String(existing.account_id));
   await db.batch([
     {
       sql: "UPDATE accounts SET balance_cents = balance_cents - ?, updated_at = ?, is_demo = 0 WHERE id = ?",
@@ -474,18 +487,23 @@ export async function deleteTransaction(id: string): Promise<void> {
 
 export async function createPlanned(input: Omit<PlannedTransaction, "id" | "currency" | "createdAt" | "updatedAt">): Promise<void> {
   await ensureSchema();
+  if (input.accountId) await assertSupportedAccountCurrencies(input.accountId);
   const now = new Date().toISOString();
   await db.execute({
     sql: `INSERT INTO planned_transactions
       (id, account_id, description, kind, amount_cents, currency, recurrence, interval_count, next_date, end_date, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'EUR', ?, ?, ?, ?, ?, ?, ?)`,
-    args: [crypto.randomUUID(), input.accountId, input.description, input.kind, input.amountCents, input.recurrence,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    args: [crypto.randomUUID(), input.accountId, input.description, input.kind, input.amountCents, DEFAULT_CURRENCY, input.recurrence,
       input.intervalCount, input.nextDate, input.endDate, Number(input.isActive), now, now],
   });
 }
 
 export async function updatePlanned(id: string, input: Omit<PlannedTransaction, "id" | "currency" | "createdAt" | "updatedAt">): Promise<void> {
   await ensureSchema();
+  const existing = await one("SELECT currency FROM planned_transactions WHERE id = ?", [id]);
+  if (!existing) throw notFound("Planned transaction");
+  assertSupportedCurrency(existing.currency);
+  if (input.accountId) await assertSupportedAccountCurrencies(input.accountId);
   const now = new Date().toISOString();
   await db.batch([
     {
@@ -512,6 +530,8 @@ export async function completePlanned(id: string, actualDate: string, accountId?
   if (!item.isActive) throw conflict("Planned transaction is inactive");
   const targetAccountId = accountId || item.accountId;
   if (!targetAccountId) throw conflict("Choose an account before marking this item paid");
+  assertSupportedCurrency(item.currency);
+  await assertSupportedAccountCurrencies(targetAccountId);
   const nextDate = addRecurrence(item.nextDate, item.recurrence, item.intervalCount);
   const remainsActive = Boolean(nextDate && (!item.endDate || nextDate <= item.endDate));
   const now = new Date().toISOString();
@@ -526,6 +546,7 @@ export async function completePlanned(id: string, actualDate: string, accountId?
 
 export async function undoPlannedCompletion(completionId: string, expectedEffectiveTransactionId: string): Promise<void> {
   await ensureSchema();
+  await assertSupportedCompletionCurrencies(completionId, expectedEffectiveTransactionId);
   const token = crypto.randomUUID();
   await db.batch(undoPlannedStatements({ completionId, expectedEffectiveTransactionId, token, now: new Date().toISOString() }));
   await requireAdjustment(completionId, "undone", token);
@@ -538,6 +559,8 @@ export async function correctPlannedCompletion(completionId: string, input: {
   expectedEffectiveTransactionId: string;
 }): Promise<void> {
   await ensureSchema();
+  await assertSupportedCompletionCurrencies(completionId, input.expectedEffectiveTransactionId);
+  await assertSupportedAccountCurrencies(input.accountId);
   const token = crypto.randomUUID();
   await db.batch(correctPlannedStatements({
     completionId, expectedEffectiveTransactionId: input.expectedEffectiveTransactionId,
@@ -545,6 +568,18 @@ export async function correctPlannedCompletion(completionId: string, input: {
     accountId: input.accountId, date: input.date, amountCents: input.amountCents, now: new Date().toISOString(),
   }));
   await requireAdjustment(completionId, "corrected", token);
+}
+
+async function assertSupportedCompletionCurrencies(completionId: string, expectedTransactionId: string): Promise<void> {
+  const row = await one(`SELECT t.currency, a.currency AS account_currency
+    FROM planned_completions c
+    JOIN transactions t ON t.id = COALESCE(c.correction_transaction_id, c.transaction_id)
+    JOIN accounts a ON a.id = t.account_id
+    WHERE c.id = ? AND t.id = ?`, [completionId, expectedTransactionId]);
+  if (row) {
+    assertSupportedCurrency(row.currency);
+    assertSupportedCurrency(row.account_currency);
+  }
 }
 
 async function requireAdjustment(id: string, expected: "undone" | "corrected", token: string): Promise<void> {
@@ -607,6 +642,9 @@ export async function updateReserve(id: string, input: {
   isActive: boolean;
 }): Promise<void> {
   await ensureSchema();
+  const existing = await one("SELECT currency FROM reserves WHERE id = ?", [id]);
+  if (!existing) throw notFound("Reserve");
+  assertSupportedCurrency(existing.currency);
   const result = await executeReserveWrite(updateReserveStatement({
     id,
     ...input,
@@ -682,21 +720,35 @@ async function one(sql: string, args: (string | number | null)[]): Promise<Row |
 
 type TransferLeg = { id: string; accountId: string; amountCents: number };
 
+async function assertSupportedAccountCurrencies(...ids: string[]): Promise<void> {
+  const result = await db.execute({
+    sql: `SELECT currency FROM accounts WHERE id IN (${ids.map(() => "?").join(", ")})`,
+    args: ids,
+  });
+  for (const row of result.rows) assertSupportedCurrency(row.currency);
+}
+
 async function requireActiveDistinctAccounts(fromAccountId: string, toAccountId: string): Promise<void> {
   if (fromAccountId === toAccountId) throw conflict("Choose two different active accounts");
   const result = await db.execute({
-    sql: "SELECT id FROM accounts WHERE id IN (?, ?) AND is_active = 1",
+    sql: "SELECT id, currency FROM accounts WHERE id IN (?, ?) AND is_active = 1",
     args: [fromAccountId, toAccountId],
   });
   if (result.rows.length !== 2) throw conflict("Transfers require two active accounts");
+  for (const row of result.rows) assertSupportedCurrency(row.currency);
 }
 
 async function transferLegs(groupId: string): Promise<{ from: TransferLeg; to: TransferLeg }> {
   const result = await db.execute({
-    sql: `SELECT id, account_id, amount_cents FROM transactions
+    sql: `SELECT t.id, t.account_id, t.amount_cents, t.currency, a.currency AS account_currency
+      FROM transactions t JOIN accounts a ON a.id = t.account_id
       WHERE transfer_group_id = ? AND kind = 'transfer' AND source = 'manual' AND voided_at IS NULL`,
     args: [groupId],
   });
+  for (const row of result.rows) {
+    assertSupportedCurrency(row.currency);
+    assertSupportedCurrency(row.account_currency);
+  }
   const legs = result.rows.map((row) => ({ id: String(row.id), accountId: String(row.account_id), amountCents: Number(row.amount_cents) }));
   const from = legs.find((leg) => leg.amountCents < 0);
   const to = legs.find((leg) => leg.amountCents > 0);
@@ -718,8 +770,8 @@ function transferInsertStatements(input: {
   const insert = (id: string, accountId: string, amountCents: number) => ({
     sql: `INSERT INTO transactions
       (id, account_id, date, amount_cents, currency, description, kind, status, source, transfer_group_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'EUR', ?, 'transfer', 'cleared', 'manual', ?, ?, ?)`,
-    args: [id, accountId, input.date, amountCents, input.description, input.groupId, input.now, input.now],
+      VALUES (?, ?, ?, ?, ?, ?, 'transfer', 'cleared', 'manual', ?, ?, ?)`,
+    args: [id, accountId, input.date, amountCents, DEFAULT_CURRENCY, input.description, input.groupId, input.now, input.now],
   });
   return [
     insert(crypto.randomUUID(), input.fromAccountId, -input.amountCents),

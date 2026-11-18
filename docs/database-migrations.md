@@ -32,3 +32,10 @@ ambiguous outcome for each non-empty source position. The optional retry key is
 unique within an account and source. Run creation, item history, accepted
 transactions, and balance effects are committed together; failed validation or
 ambiguity runs commit audit history only.
+
+
+Version 13 adds currency guards without rewriting existing amounts or codes.
+New codes must use three uppercase letters. Denomination changes are rejected;
+linked transactions, plans and reserves must use the same currency as their
+account or obligation. Existing unsupported data remains exportable, and the
+calculation/view boundaries reject it rather than combining or relabeling it.
