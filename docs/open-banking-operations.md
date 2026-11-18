@@ -157,8 +157,10 @@ holds distinct funds. Replacing the identity on an already-linked account,
 including a switch of providers for the same bank account, requires a verified
 history cutover and is currently unsupported.
 
-A sync rejects the entire snapshot when new or corrected bank bookings overlap
-unresolved statement bookings on the same account. A statement import rejects
+A sync rejects the entire snapshot when its new or corrected bank bookings,
+new transaction coverage, or advancing booked balance checkpoint overlap
+unresolved statement bookings on the same account. An advancing checkpoint
+includes dates in a gap since the previous checkpoint. A statement import rejects
 unmatched booked rows on or before the latest bank balance checkpoint because
 their amounts may already be included in cash. This applies to dates before
 the requested transaction window and dates inside a coverage gap. Bookings
