@@ -21,6 +21,7 @@ const server = await createServer({
       { find: "npm:hono@4/html", replacement: "hono/html" },
       { find: "npm:hono@4/jsx", replacement: "hono/jsx" },
       { find: "https://esm.town/v/std/sqlite/main.ts", replacement: file("tests/support/val-sqlite.ts") },
+      { find: "https://esm.town/v/std/oauth/crypto.ts", replacement: file("tests/support/oauth-middleware.ts") },
       { find: "https://esm.town/v/std/oauth/middleware.ts", replacement: file("tests/support/oauth-middleware.ts") },
       { find: "https://esm.town/v/std/utils/index.ts", replacement: file("tests/support/val-utils.ts") },
     ],
