@@ -734,25 +734,28 @@ export async function ingestTransactions(input: {
       const lastDate = newBookedDates.at(-1) ?? null;
       const from = firstDate && input.bankCoverageFrom && input.bankCoverageFrom < firstDate ? input.bankCoverageFrom : firstDate;
       const through = lastDate && input.bankCoverageThrough && input.bankCoverageThrough > lastDate ? input.bankCoverageThrough : lastDate;
-      // Check the new checkpoint even if nothing was booked in this snapshot.
-      // A later booked balance also covers dates in a gap after the last sync.
-      const statementBookings = `SELECT t.import_identity FROM transactions t
+      const checkpointThrough = input.bankCoverageThrough ?? null;
+      // Check newly covered history and every statement booking after the
+      // last checkpoint. Replacing cash would also erase later local deltas
+      // that the incoming booked balance cannot include.
+      const statementBookings = `SELECT t.import_identity, COALESCE(t.date > ?, 0) AS after_checkpoint FROM transactions t
         LEFT JOIN bank_account_sync_coverage coverage ON coverage.account_id = t.account_id
         WHERE t.account_id = ? AND t.source = 'import' AND t.bank_connection_id IS NULL
           AND t.status = 'cleared' AND t.voided_at IS NULL
-          AND (t.date BETWEEN ? AND ? OR (t.date <= ? AND (
+          AND (t.date BETWEEN ? AND ? OR (? IS NOT NULL AND (
             t.date > coverage.last_date OR (t.date >= ? AND (coverage.first_date IS NULL OR t.date < coverage.first_date))
           )))`;
-      const args = [input.accountId, from, through, input.bankCoverageThrough ?? null, input.bankCoverageFrom ?? null];
+      const args = [checkpointThrough, input.accountId, from, through, checkpointThrough, input.bankCoverageFrom ?? null];
       const statementsAtRisk = await db.execute({ sql: statementBookings, args });
-      if (statementsAtRisk.rows.some(({ import_identity }) => !existing.has(String(import_identity)))) {
+      if (statementsAtRisk.rows.some(({ import_identity, after_checkpoint }) =>
+        Number(after_checkpoint) === 1 || !existing.has(String(import_identity)))) {
         throw conflict(bankStatementOverlap);
       }
       // Recheck inside the write batch after its ingestion items are staged.
       // A concurrent import may have added a new unresolved statement booking.
       plan.statements.push({
         sql: `INSERT INTO bank_sync_guards (claim) SELECT NOT EXISTS (
-          SELECT 1 FROM (${statementBookings}) tabular WHERE NOT EXISTS (
+          SELECT 1 FROM (${statementBookings}) tabular WHERE tabular.after_checkpoint = 1 OR NOT EXISTS (
             SELECT 1 FROM ingestion_items item WHERE item.import_id = ?
               AND item.status = 'duplicate' AND item.import_identity = tabular.import_identity
           ))`,

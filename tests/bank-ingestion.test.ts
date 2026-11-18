@@ -195,7 +195,38 @@ describe("bank snapshot accounting conflicts", () => {
       .rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
   });
 
-  it("rolls back a pending-only checkpoint when a statement commits in the gap before the new window", async () => {
+  it.each([
+    { through: "2026-09-30", reportsLaterBooking: false },
+    { through: "2026-09-29", reportsLaterBooking: false },
+    { through: "2026-09-30", reportsLaterBooking: true },
+  ])("keeps a later statement delta when the checkpoint is $through (shared ID $reportsLaterBooking)", async ({ through, reportsLaterBooking }) => {
+    const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic later statement");
+    const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
+      accounts: [{ ...account, transactions: [] }] };
+    await applyBankConnectionSnapshot(snapshot);
+    expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2 }))
+      .toMatchObject({ importedCount: 0, duplicateCount: 0 });
+    const booking = { occurredOn: "2026-10-01", amountCents: -200, description: "Later booking", externalId: "later-id" };
+    await ingestTransactions({ accountId, source: "csv", filename: "Synthetic statement", transactions: [booking] });
+
+    await expect(applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 3, accounts: [{ ...account,
+      coverageThrough: through, transactions: reportsLaterBooking ? [booking] : [],
+    }] })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("overlaps") });
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+    expect(database.prepare("SELECT COUNT(*) AS n FROM account_reconciliations WHERE account_id = ?").get(accountId)!.n).toBe(1);
+
+    expect(await applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 3, accounts: [{ ...account,
+      coverageThrough: booking.occurredOn, balanceCents: 800, transactions: [booking],
+    }] })).toMatchObject({ importedCount: 0, duplicateCount: 1 });
+    expect(database.prepare("SELECT date, amount_cents FROM transactions WHERE account_id = ?").all(accountId))
+      .toEqual([{ date: booking.occurredOn, amount_cents: -200 }]);
+    expect(database.prepare("SELECT balance_cents FROM accounts WHERE id = ?").get(accountId)!.balance_cents).toBe(800);
+  });
+
+  it.each([
+    { from: "2027-01-01", through: "2027-03-31" },
+    { from: "2026-09-01", through: "2026-09-30" },
+  ])("rolls back a pending-only checkpoint through $through when a later statement commits first", async ({ from, through }) => {
     const { accountId, connectionId, account } = await mappedStatementAccount("Synthetic checkpoint race");
     const snapshot = { connectionId, provider: "synthetic", expectedRevision: 1,
       accounts: [{ ...account, transactions: [] }] };
@@ -209,8 +240,8 @@ describe("bank snapshot accounting conflicts", () => {
     });
     try {
       await expect(applyBankConnectionSnapshot({ ...snapshot, expectedRevision: 2, accounts: [{ ...account,
-        coverageFrom: "2027-01-01", coverageThrough: "2027-03-31",
-        transactions: [{ occurredOn: "2027-03-30", amountCents: -100, description: "Pending hold",
+        coverageFrom: from, coverageThrough: through,
+        transactions: [{ occurredOn: through, amountCents: -100, description: "Pending hold",
           externalId: "pending-id", status: "pending" }],
       }] })).rejects.toMatchObject({ status: 409, importId: expect.any(String) });
     } finally {

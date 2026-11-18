@@ -160,15 +160,19 @@ history cutover and is currently unsupported.
 A sync rejects the entire snapshot when its new or corrected bank bookings,
 new transaction coverage, or advancing booked balance checkpoint overlap
 unresolved statement bookings on the same account. An advancing checkpoint
-includes dates in a gap since the previous checkpoint. A statement import rejects
-unmatched booked rows on or before the latest bank balance checkpoint because
-their amounts may already be included in cash. This applies to dates before
-the requested transaction window and dates inside a coverage gap. Bookings
-after the checkpoint follow normal import rules. A booking on the same date
-as a recorded bank booking also requires identity reconciliation. Verified
-shared stable IDs with identical booking details are deduplicated. A
-concurrent commit may cause the other operation to fail with a conflict.
-Retry so it can assess the committed IDs.
+includes dates in a gap since the previous checkpoint. A sync also rejects
+a booked balance that would overwrite the effect of a later cleared statement
+booking. Retry with a checkpoint that covers the booking and a verified
+shared ID.
+
+A statement import rejects unmatched booked rows on or before the latest bank
+balance checkpoint because their amounts may already be included in cash.
+This applies to dates before the requested transaction window and dates inside
+a coverage gap. Bookings after the checkpoint follow normal import rules. A
+booking on the same date as a recorded bank booking also requires identity
+reconciliation. Verified shared stable IDs with identical booking details are
+deduplicated. A concurrent commit may cause the other operation to fail with a
+conflict. Retry so it can assess the committed IDs.
 
 Map the verified provider ID column when importing a statement for the first
 time, if the export includes it. Reimporting an earlier statement with added
