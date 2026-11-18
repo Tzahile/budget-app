@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { GeminiAdvisor, serializeApprovedSnapshot } from "../server/gemini-advisor.ts";
-import type { RedactedFinancialSnapshot } from "../shared/ai-advisor.ts";
+import type { RedactedFinancialSnapshot, RedactedFinancialSnapshotV1 } from "../shared/ai-advisor.ts";
 
-function snapshot(): RedactedFinancialSnapshot {
+function snapshot(): RedactedFinancialSnapshotV1 {
   return {
     schemaVersion: 1, currency: "EUR", asOfMonth: "2026-10",
     currentCashCents: 100_000, spentThisMonthCents: 20_000, remainingIncomeCents: 50_000,
@@ -25,6 +25,17 @@ function advisor(request: typeof fetch, timeoutMs = 15_000) {
 }
 
 describe("server-only Gemini advisor", () => {
+  it("sends edited sparse data unchanged and instructs the provider that omissions are unknown", async () => {
+    const request = mocked();
+    const input = { schemaVersion: 2 as const, valueOrigin: "user_edited" as const, currency: "EUR" as const, asOfMonth: "2026-10", availableToSpendCents: -999 };
+    await advisor(request).advise(input);
+    const body = JSON.parse(request.mock.calls[0][1]!.body as string);
+    expect(body.contents[0].parts[0].text).toBe(JSON.stringify(input));
+    expect(body.systemInstruction.parts[0].text).toContain("hypothetical assumption");
+    expect(body.systemInstruction.parts[0].text).toContain("Omitted fields are unknown, never zero");
+    expect(body.contents[0].parts[0].text).not.toContain("currentCashCents");
+  });
+
   it("sends exactly the approved snapshot and fixed instructions, with key in a header", async () => {
     const request = mocked();
     const adapter = advisor(request);

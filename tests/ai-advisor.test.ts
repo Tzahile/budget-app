@@ -80,6 +80,7 @@ describe("redacted AI boundary", () => {
     const snapshot = createRedactedFinancialSnapshot(source);
     const adapter: AiAdvisor = {
       async advise(input) {
+        if (input.schemaVersion !== 1) throw new Error("Expected calculated snapshot");
         expect(input).toBe(snapshot);
         expect(Object.isFrozen(input)).toBe(true);
         expect(Object.isFrozen(input.projectionMonths)).toBe(true);

@@ -41,6 +41,16 @@ async function verifyPreview(key: CryptoKey, session: AiSession, origin: string,
   return crypto.subtle.verify("HMAC", key, signature, signatureData(session, origin, expiresAt, payload));
 }
 
+function parsePreviewPayload(payload: string): RedactedFinancialSnapshot {
+  try {
+    const snapshot = JSON.parse(payload) as RedactedFinancialSnapshot;
+    if (serializeApprovedSnapshot(snapshot) !== payload) throw new Error();
+    return snapshot;
+  } catch {
+    throw new ValidationError("The approved AI payload is invalid; create a new preview");
+  }
+}
+
 /** Mount only behind the application's authentication, origin and security middleware. */
 export function createAiRoutes(dependencies: {
   getDashboard: () => Promise<DashboardSummary>;
@@ -66,6 +76,34 @@ export function createAiRoutes(dependencies: {
     return c.json(preview);
   });
 
+  routes.post("/preview/edited", async (c) => {
+    const body = await readJsonObject(c.req.raw);
+    const session = c.get("aiSession");
+    if (!session) return c.json({ error: "Authentication required" }, 401);
+    const { originalPayload, originalProof, payload } = body;
+    if (Object.keys(body).length !== 3 || typeof originalPayload !== "string" ||
+        typeof originalProof !== "string" || typeof payload !== "string") {
+      throw new ValidationError("A calculated preview and the edited payload are required");
+    }
+    const origin = new URL(c.req.url).origin;
+    const key = await previewSigningKey(await dependencies.getSigningKeyMaterial(origin));
+    const now = Date.now();
+    if (!await verifyPreview(key, session, origin, originalPayload, originalProof, now)) {
+      throw new ValidationError("The calculated AI preview is invalid or expired; create a new preview");
+    }
+    const original = parsePreviewPayload(originalPayload);
+    const edited = parsePreviewPayload(payload);
+    if (original.schemaVersion !== 1 || edited.schemaVersion !== 2 || edited.asOfMonth !== original.asOfMonth) {
+      throw new ValidationError("The edited payload must use the calculated preview month");
+    }
+    const editedMonths = (edited.projectionMonths ?? []).map(({ month }) => month);
+    const originalMonths = new Set(original.projectionMonths.map(({ month }) => month));
+    if (new Set(editedMonths).size !== editedMonths.length || editedMonths.some((month) => !originalMonths.has(month))) {
+      throw new ValidationError("The edited payload may include each calculated projection month once");
+    }
+    return c.json({ payload, previewProof: await signPreview(key, session, origin, payload, now) });
+  });
+
   routes.post("/advice", async (c) => {
     const body = await readJsonObject(c.req.raw);
     const session = c.get("aiSession");
@@ -78,13 +116,7 @@ export function createAiRoutes(dependencies: {
     if (!await verifyPreview(key, session, origin, body.payload, body.previewProof, Date.now())) {
       throw new ValidationError("The AI preview is invalid or expired; create a new preview");
     }
-    let snapshot: RedactedFinancialSnapshot;
-    try {
-      snapshot = JSON.parse(body.payload) as RedactedFinancialSnapshot;
-      if (serializeApprovedSnapshot(snapshot) !== body.payload) throw new Error();
-    } catch {
-      throw new ValidationError("The approved AI payload is invalid; create a new preview");
-    }
+    const snapshot = parsePreviewPayload(body.payload);
     // Production never injects a provider: no environment flag, key or billing fallback.
     if (!dependencies.advisor) return c.json({ error: AI_DISABLED_REASON, code: "disabled" }, 503);
     try {

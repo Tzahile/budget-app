@@ -128,3 +128,47 @@ panel as escaped text. Errors remain bounded; rate limits use HTTP 429 and other
 provider failures HTTP 503. A failed request consumes the checkbox consent;
 retry requires explicit approval again. No automatic retries or accounting
 writes occur. Cancel closes preview/results without sending.
+
+## Edited advisory payloads (schema version 2)
+
+The preview's **Adjust or omit advisory values** controls accept only whole integer
+EUR cents for existing aggregate fields. Each field shows its original calculated
+value and whether it is unchanged, edited or omitted. Users can omit individual
+amounts, individual projection months or all projections. Month labels, currency,
+schema metadata and field names are fixed; there is no free-text/JSON editor.
+Related totals are deliberately not recalculated after edits: these are assumptions
+for one advisory request, never replacement accounting values.
+
+Unchanged selections send the original version-1 JSON. A changed selection sends
+version 2 with required `schemaVersion: 2`, `valueOrigin: "user_edited"`, `currency:
+"EUR"` and `asOfMonth`. The same seven root aggregate fields are optional; an
+optional `projectionMonths` array contains fixed month labels and any selected
+projection aggregates. Omitted amounts are absent, not zero or null. The provider
+instruction treats version-2 amounts as hypothetical assumptions, missing values
+as unknown, and inconsistent/insufficient data as uncertainty to explain. It must
+not reconstruct omitted financial data. No keys, notes, identifiers or raw records
+can enter the payload through these controls. The shared runtime validator rejects
+unknown keys, wrong metadata, unsafe/noninteger amounts and malformed nested data
+again on the server and immediately before provider access.
+
+The exact current outbound JSON remains visible. Invalid included inputs remove
+the sendable preview and disable confirmation/sending; they must be corrected or
+omitted. Every edit, omission, reset or new preview clears consent and prior advice.
+**Reset to calculated values** restores the original snapshot without reading or
+writing accounting state. The original calculated JSON is also available in a
+separate disclosure. Advisory results based on edits are explicitly labelled.
+
+**Preview edited payload** submits the exact edited JSON and the original
+calculated preview with its proof to `POST /api/ai/preview/edited`. This
+same-origin request verifies the original proof and validates the edited schema
+and months before issuing a separate proof for the edited bytes. It makes no
+provider call. The confirmation checkbox remains disabled until this preview
+is issued, and editing or resetting clears the edited proof and consent.
+The authenticated confirmation endpoint accepts either validated schema with
+its matching proof. Only the approved JSON reaches the provider. The preview
+and confirmation routes do not refresh or mutate ledger data after the
+calculated preview is issued. Production external sending remains hard-disabled under the same
+Italy/free-only blocker, including for valid edited payloads. Synthetic reducer,
+serializer, route, mocked-provider and HTTP tests exercise omission semantics,
+fresh consent, exact bytes and unchanged accounting state. These checks do not
+replace desktop/phone visual verification or the required GitHub CI gate.

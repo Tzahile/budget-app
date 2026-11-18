@@ -24,7 +24,7 @@ function request(path: string, init: RequestInit = {}, user: string | null = "tz
 describe("Hono financial API security integration", () => {
   it("protects AI previews and keeps confirmed production AI disabled without accounting mutations", async () => {
     const headers = { Origin: "https://budget.example", "X-BudgetApp-Request": "1", "Content-Type": "application/json" };
-    for (const path of ["/api/ai/preview", "/api/ai/advice"]) {
+    for (const path of ["/api/ai/preview", "/api/ai/preview/edited", "/api/ai/advice"]) {
       expect((await request(path, { method: "POST", headers, body: "{}" }, null)).status).toBe(401);
       expect((await request(path, { method: "POST", headers, body: "{}" }, "not-allowed")).status).toBe(403);
       expect((await request(path, { method: "POST", body: "{}" })).status).toBe(403);
@@ -38,6 +38,18 @@ describe("Hono financial API security integration", () => {
     const send = await request("/api/ai/advice", { method: "POST", headers, body: JSON.stringify({ payload: preview.payload, previewProof: preview.previewProof, confirmed: true }) });
     expect(send.status).toBe(503);
     expect(await send.json()).toMatchObject({ code: "disabled" });
+    const { asOfMonth } = JSON.parse(preview.payload) as { asOfMonth: string };
+    const edited = JSON.stringify({ schemaVersion: 2, valueOrigin: "user_edited", currency: "EUR", asOfMonth, currentCashCents: -1234 });
+    const editedPreview = await request("/api/ai/preview/edited", { method: "POST", headers, body: JSON.stringify({
+      originalPayload: preview.payload, originalProof: preview.previewProof, payload: edited,
+    }) });
+    expect(editedPreview.status).toBe(200);
+    expect(editedPreview.headers.get("Cache-Control")).toBe("no-store");
+    const signed = await editedPreview.json() as { payload: string; previewProof: string };
+    expect(signed.payload).toBe(edited);
+    const editedSend = await request("/api/ai/advice", { method: "POST", headers, body: JSON.stringify({ ...signed, confirmed: true }) });
+    expect(editedSend.status).toBe(503);
+    expect(await editedSend.json()).toMatchObject({ code: "disabled" });
     expect(await (await request("/api/data")).json()).toEqual(before);
   });
   it("previews XLSX sheets, imports via saved CSV mapping, and deduplicates across formats", async () => {
