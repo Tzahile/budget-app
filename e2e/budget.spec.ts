@@ -215,6 +215,13 @@ test("CSV and XLSX imports share dedupe and reject an invalid preview without ch
   await expect(importer.getByRole("status")).toHaveText("Imported 1; 0 duplicates; 0 ambiguous.");
   await overview(page, 98_750, 1_250);
   await navigate(page, "Activity");
+  const source = page.getByRole("combobox", { name: "Source", exact: true });
+  await source.selectOption("android_notification");
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await expect(page.getByText("No matching transactions.")).toBeVisible();
+  await source.selectOption("csv");
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await expect(page.getByText("Synthetic imported expense", { exact: true })).toBeVisible();
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Synthetic movements");
   sheet.addRow(["Date", "Amount", "Description", "ID"]);

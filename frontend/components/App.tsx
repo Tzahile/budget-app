@@ -314,8 +314,10 @@ function Activity({ data, revision, onImported, onAdd, onAddTransfer, onTransfer
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [filters, cursor, revision]);
-  const set = (field: keyof ActivityFilters) => (event: FormEvent<HTMLInputElement | HTMLSelectElement>) =>
-    setForm((current) => ({ ...current, [field]: event.currentTarget.value }));
+  const set = (field: keyof ActivityFilters) => (event: FormEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const value = event.currentTarget.value;
+    setForm((current) => ({ ...current, [field]: value }));
+  };
   const apply = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setPage(null); setHistory([]); setFilters({ ...form }); };
   const reset = () => { setForm(emptyActivityFilters); setFilters(emptyActivityFilters); setPage(null); setHistory([]); };
   return <Page title="Activity" subtitle="Income, expenses, and refunds change balances; transfers move money between your own accounts." action="Add transaction" onAction={onAdd}>
