@@ -101,8 +101,9 @@ app and runs `vt push` on every push.
 
 Val Town code becomes read-only on **December 10, 2026**, and hosted apps
 shut down on **January 10, 2027**. The
-[free production hosting plan](docs/production-hostname.md) covers the
-synthetic pilot, fresh database setup and launch verification. See [Val Town's announcement](https://blog.val.town/winding-down).
+[Vercel Hobby migration plan](docs/production-hostname.md) covers the Node and
+React deployment, fresh Turso database, GitHub sign-in and hosted launch
+checks. See [Val Town's announcement](https://blog.val.town/winding-down).
 
 Initial setup:
 
