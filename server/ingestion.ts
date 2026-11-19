@@ -3,7 +3,7 @@ import { assertDateOnly } from "../shared/finance.ts";
 import type { TransactionStatus } from "../shared/types.ts";
 import type { MigrationStatement } from "./migrations.ts";
 
-export type IngestionSource = "csv" | "xlsx" | "open_banking";
+export type IngestionSource = "csv" | "xlsx" | "open_banking" | "android_notification";
 
 /** The source-neutral boundary every import and future bank sync must cross. */
 export interface CanonicalTransactionInput {
@@ -62,7 +62,7 @@ export interface IngestionDuplicateAssessment {
   transaction: PreparedIngestionTransaction;
   decision: IngestionDuplicateDecision;
   /** Stable, non-sensitive reason suitable for UI/API feedback. */
-  reason: "new_identity" | "trusted_external_id" | "fallback_fingerprint";
+  reason: "new_identity" | "trusted_external_id" | "fallback_fingerprint" | "notification_overlap";
 }
 
 export interface IngestionWriteInput {
@@ -74,6 +74,7 @@ export interface IngestionWriteInput {
   transactions: PreparedIngestionTransaction[];
   assessments: readonly IngestionDuplicateAssessment[];
   retryKey?: string | null;
+  retryFingerprint?: string | null;
 }
 
 export interface IngestionWritePlan {
@@ -232,10 +233,10 @@ export function ingestionWritePlan(input: IngestionWriteInput): IngestionWritePl
   const statements: MigrationStatement[] = [{
     sql: `INSERT INTO imports
       (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
-       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at)
-      VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, 0, 0, NULL, ?, ?, NULL)`,
+       ambiguous_count, error_count, error_summary, retry_key, request_fingerprint, created_at, completed_at)
+      VALUES (?, ?, ?, ?, 'processing', ?, 0, 0, 0, 0, NULL, ?, ?, ?, NULL)`,
     args: [input.importId, input.filename, input.source, input.accountId, input.transactions.length,
-      input.retryKey ?? null, input.now],
+      input.retryKey ?? null, input.retryFingerprint ?? null, input.now],
   }];
   for (const transaction of imported) {
     statements.push({
@@ -294,13 +295,13 @@ export function rejectedIngestionWritePlan(input: IngestionWriteInput & {
   const statements: MigrationStatement[] = [{
     sql: `INSERT INTO imports
       (id, filename, source, account_id, status, row_count, imported_count, duplicate_count,
-       ambiguous_count, error_count, error_summary, retry_key, created_at, completed_at)
-      VALUES (?, ?, ?, ?, 'failed', ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+       ambiguous_count, error_count, error_summary, retry_key, request_fingerprint, created_at, completed_at)
+      VALUES (?, ?, ?, ?, 'failed', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [input.importId, input.filename, input.source, input.accountId, positions.size,
       input.assessments.filter((value) => value.decision === "duplicate").length,
       input.assessments.filter((value) => value.decision === "ambiguous").length,
       input.rowErrors.length + input.assessments.filter((value) => value.decision === "accepted").length,
-      input.errorSummary, input.retryKey ?? null, input.now, input.now],
+      input.errorSummary, input.retryKey ?? null, input.retryFingerprint ?? null, input.now, input.now],
   }];
   for (const sourcePosition of [...positions].sort((a, b) => a - b)) {
     const rowError = rowErrorsByPosition.get(sourcePosition);
@@ -312,7 +313,7 @@ export function rejectedIngestionWritePlan(input: IngestionWriteInput & {
       status,
       transactionId: null,
       importIdentity: assessment?.transaction.importIdentity ?? null,
-      errorCode: rowError?.code ?? (status === "ambiguous" ? "ambiguous_fingerprint" : status === "error" ? "run_blocked" : null),
+      errorCode: rowError?.code ?? (status === "ambiguous" ? (assessment?.reason === "notification_overlap" ? "notification_overlap" : "ambiguous_fingerprint") : status === "error" ? "run_blocked" : null),
       errorSummary: rowError ? safeRowErrorSummary(rowError.code) : (status === "ambiguous"
         ? "A similar transaction needs review"
         : status === "error" ? "Not imported because the run was blocked" : null),

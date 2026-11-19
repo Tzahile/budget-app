@@ -48,7 +48,7 @@ describe("database migrations", () => {
   it("brings a fresh database to the latest schema", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16]);
     expect(columns("accounts")).toContain("is_demo");
     expect(columns("planned_transactions")).toEqual(expect.arrayContaining(["revision", "latest_completion_id", "is_demo"]));
     expect(columns("transactions")).toEqual(expect.arrayContaining(["corrected_from_transaction_id", "voided_at", "is_demo"]));
@@ -83,7 +83,7 @@ describe("database migrations", () => {
 
     await migrateDatabase(database, migrations, () => appliedAt);
 
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16]);
     expect(sqlite.prepare("SELECT name, balance_cents, is_demo FROM accounts WHERE id = ?")
       .get("account-legacy")).toMatchObject({ name: "Household current", balance_cents: 123_456, is_demo: 0 });
     expect(sqlite.prepare("SELECT description, revision, is_demo FROM planned_transactions WHERE id = ?")
@@ -194,18 +194,32 @@ describe("database migrations", () => {
     expect(() => sqlite.exec("UPDATE transactions SET currency = 'EUR' WHERE id = 'valid'")).toThrow(/Currency is immutable|currency must match account/);
   });
 
+  it("preserves existing import sources and retry identities when adding notification ingestion", async () => {
+    await migrateDatabase(database, migrations.slice(0, 13), () => appliedAt);
+    sqlite.exec(`INSERT INTO accounts (id, name, type, balance_cents, created_at, updated_at)
+      VALUES ('synthetic', 'Synthetic', 'checking', 10000, '', '');
+      INSERT INTO imports (id, filename, source, account_id, status, retry_key, created_at)
+      VALUES ('synthetic-csv', 'synthetic.csv', 'csv', 'synthetic', 'completed', 'synthetic-retry', ''),
+        ('synthetic-xlsx', 'synthetic.xlsx', 'xlsx', 'synthetic', 'completed', 'synthetic-xlsx-retry', '');`);
+    await migrateDatabase(database, migrations, () => appliedAt);
+    expect(sqlite.prepare("SELECT source, retry_key, request_fingerprint FROM imports ORDER BY id").all()).toEqual([
+      { source: "csv", retry_key: "synthetic-retry", request_fingerprint: null },
+      { source: "xlsx", retry_key: "synthetic-xlsx-retry", request_fingerprint: null },
+    ]);
+  });
+
   it("rolls back the statements and marker when a migration fails", async () => {
     await migrateDatabase(database, migrations, () => appliedAt);
     const broken: Migration = {
-      version: 14,
+      version: 17,
       name: "synthetic broken migration",
       statements: ["CREATE TABLE should_roll_back (id TEXT PRIMARY KEY)", "THIS IS NOT SQL"],
     };
 
     await expect(migrateDatabase(database, [...migrations, broken], () => appliedAt))
-      .rejects.toThrow("Database migration 14 (synthetic broken migration) failed");
+      .rejects.toThrow("Database migration 17 (synthetic broken migration) failed");
     expect(tableExists("should_roll_back")).toBe(false);
-    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(versions()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16]);
   });
 });
 
