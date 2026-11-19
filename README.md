@@ -101,9 +101,8 @@ app and runs `vt push` on every push.
 
 Val Town code becomes read-only on **December 10, 2026**, and hosted apps
 shut down on **January 10, 2027**. The
-[production hostname and migration runbook](docs/production-hostname.md)
-covers current endpoint verification, free hosting candidates, and cutover
-and rollback. See [Val Town's announcement](https://blog.val.town/winding-down).
+[free production hosting plan](docs/production-hostname.md) covers the
+synthetic pilot, fresh database setup and launch verification. See [Val Town's announcement](https://blog.val.town/winding-down).
 
 Initial setup:
 
